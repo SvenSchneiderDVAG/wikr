@@ -16,7 +16,7 @@ wikr is a simple command line tool that provides quick summaries of Wikipedia ar
 2. Clone this Repository:
 
    ```shell
-   git clone https://github.com/ihr-benutzername/wikr.git
+   git clone https://github.com/SvenSchneiderDVAG/wikr.git
    ```
 
 3. Navigate to the project directory:
