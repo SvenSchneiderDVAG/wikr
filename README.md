@@ -1,6 +1,6 @@
 # wikr
 
-wikr is a simplecommand line tool that provides quick summaries of Wikipedia articles in German or English.
+wikr is a simple command line tool that provides quick summaries of Wikipedia articles in German or English.
 
 ## Features
 
