@@ -13,10 +13,17 @@ import (
 	"path/filepath"
 	"time"
 	"sync"
+	"flag"
 )
 
-const wikipediaAPITemplate = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
-const wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
+const (
+	wikipediaAPITemplate = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
+	wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
+	cacheFileName = ".wikr_cache.json"
+	cacheDuration = 24 * time.Hour
+	debug = false
+	version = "0.1.0"
+)
 
 type CacheEntry struct {
 	Summary   string    `json:"summary"`
@@ -26,8 +33,9 @@ type CacheEntry struct {
 
 type Cache map[string]CacheEntry
 
-const cacheFileName = ".wikr_cache.json"
-const cacheDuration = 24 * time.Hour
+type Config struct {
+	MaxResults int
+}
 
 func getCachePath() string {
 	homeDir, err := os.UserHomeDir()
@@ -38,40 +46,47 @@ func getCachePath() string {
 }
 
 func loadCache() Cache {
+	createEmptyCacheFileIfNotExists()
 	cache := make(Cache)
 	cachePath := getCachePath()
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
-		fmt.Printf("Fehler beim Lesen der Cache-Datei %s: %v\n", cachePath, err)
+		if debug {
+			fmt.Printf("Error reading cache file %s: %v\n", cachePath, err)
+		}
 		return cache
 	}
 	err = json.Unmarshal(data, &cache)
-	if err != nil {
-		fmt.Printf("Fehler beim Entschlüsseln des Caches: %v\n", err)
+	if err != nil && debug {
+		fmt.Printf("Error decoding cache: %v\n", err)
 	}
 	return cache
 }
 
 func saveCache(cache Cache) {
 	data, err := json.Marshal(cache)
-	if err != nil {
-		fmt.Printf("Fehler beim Verschlüsseln des Caches: %v\n", err)
+	if err != nil && debug {
+		fmt.Printf("Error encoding cache: %v\n", err)
 		return
 	}
 	cachePath := getCachePath()
 	err = os.WriteFile(cachePath, data, 0644)
-	if err != nil {
-		fmt.Printf("Fehler beim Schreiben der Cache-Datei %s: %v\n", cachePath, err)
+	if err != nil && debug {
+		fmt.Printf("Error writing cache file %s: %v\n", cachePath, err)
 	}
 }
 
 func getCachedEntry(lang, title string) (string, string, bool) {
 	cache := loadCache()
 	key := lang + ":" + title
-	fmt.Printf("\nSuche nach Cache-Eintrag für Schlüssel: %s\n", key) // Debug-Ausgabe
+	if debug {
+		fmt.Printf("\nSearch for cache entry for key: %s\n", key)
+	}
 	entry, exists := cache[key]
 	if exists {
-		fmt.Printf("Cache-Eintrag gefunden, Alter: %v\n", time.Since(entry.Timestamp)) // Debug-Ausgabe
+		if debug {
+			fmt.Printf("Cache entry found, age: %v\n", time.Since(entry.Timestamp))
+		}
 		if time.Since(entry.Timestamp) < cacheDuration {
 			return entry.Summary, entry.URL, true
 		}
@@ -87,7 +102,9 @@ func setCachedEntry(lang, title, summary, url string) {
 		URL:       url,
 		Timestamp: time.Now(),
 	}
-	fmt.Printf("Speichere Cache-Eintrag für Schlüssel: %s\n", key) // Debug-Ausgabe
+	if debug {
+		fmt.Printf("Save cache entry for key: %s\n", key)
+	}
 	saveCache(cache)
 }
 
@@ -99,6 +116,7 @@ func showLoadingAnimation(done chan bool) {
 		case <-done:
 			return
 		default:
+			fmt.Println()
 			fmt.Printf("\rLade Daten... %s", animation[i])
 			i = (i + 1) % len(animation)
 			time.Sleep(100 * time.Millisecond)
@@ -116,11 +134,11 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 		showLoadingAnimation(done)
 	}()
 
-	// Versuche zuerst, den Eintrag aus dem Cache zu holen
+	// Try to get the entry from the cache first
 	if summary, url, found := getCachedEntry(lang, title); found {
 		close(done)
 		wg.Wait()
-		fmt.Print("\r") // Löscht die Ladeanimation
+		fmt.Print("\r") // Clears the loading animation
 		return summary, url, true, nil
 	}
 
@@ -129,7 +147,7 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 	if err != nil {
 		close(done)
 		wg.Wait()
-		fmt.Print("\r") // Löscht die Ladeanimation
+		fmt.Print("\r")
 		return "", "", false, err
 	}
 	defer response.Body.Close()
@@ -138,7 +156,7 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 	if err != nil {
 		close(done)
 		wg.Wait()
-		fmt.Print("\r") // Löscht die Ladeanimation
+		fmt.Print("\r")
 		return "", "", false, err
 	}
 
@@ -147,61 +165,106 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 	if err != nil {
 		close(done)
 		wg.Wait()
-		fmt.Print("\r") // Löscht die Ladeanimation
+		fmt.Print("\r")
 		return "", "", false, err
 	}
 
 	summary := result["extract"].(string)
 	url := result["content_urls"].(map[string]interface{})["desktop"].(map[string]interface{})["page"].(string)
 
-	// Kürze die Zusammenfassung auf maximal 1000 Zeichen
+	// Shorten the summary to a maximum of 1000 characters
 	if len(summary) > 1000 {
 		summary = summary[:997] + "..."
 	}
 
 	close(done)
 	wg.Wait()
-	fmt.Print("\r") // Löscht die Ladeanimation
+	fmt.Print("\r") // Clears the loading animation
 
-	// Cache den neuen Eintrag
+	// Cache the new entry
 	setCachedEntry(lang, title, summary, url)
 
 	return summary, url, false, nil
 }
 
+func clearCache() error {
+	cachePath := getCachePath()
+	err := os.Remove(cachePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("error deleting cache file: %v", err)
+	}
+	if debug {
+		fmt.Println("Cache was deleted successfully.")
+	}
+	return nil
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Verwendung: askw [de|en] Suchbegriff")
-		os.Exit(1)
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] <search term>\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  %s -lang en -max 10 Golang\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -clear-cache\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -version\n", os.Args[0])
+	}
+	lang := flag.String("lang", "de", "language of the Wikipedia")
+	maxResults := flag.Int("max", 5, "maximum amount of result entries")
+	isClearCache := flag.Bool("clear-cache", false, "clear cache and exit")
+	isVersion := flag.Bool("version", false, "show version")
+	flag.Parse()
+
+	if *isClearCache {
+		err := clearCache()
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		fmt.Println("Cache cleared.")
+		return
 	}
 
-	lang := "de"
+	if len(os.Args) < 2 {
+        fmt.Fprintf(os.Stderr, "Error: search term is required\n")
+        flag.Usage()
+        os.Exit(1)
+    }
+
+	if *isVersion {
+		fmt.Println("Version:", version)
+		return
+	}
+
 	var searchTermParts []string
 
 	if os.Args[1] == "de" || os.Args[1] == "en" {
-		lang = os.Args[1]
+		*lang = os.Args[1]
 		searchTermParts = os.Args[2:]
+	} else if os.Args[1] == "-lang" {
+		*lang = os.Args[2]
+		searchTermParts = os.Args[3:]
 	} else {
 		searchTermParts = os.Args[1:]
 	}
 
 	if len(searchTermParts) == 0 {
-		fmt.Println("Bitte geben Sie einen Suchbegriff ein.")
+		fmt.Println("Please provide a search term.")
 		os.Exit(1)
 	}
 
 	searchTerm := strings.Join(searchTermParts, " ")
 	encodedSearchTerm := url.QueryEscape(searchTerm)
 
-	// Suche nach möglichen Ergebnissen
-	searchResults, err := searchWikipedia(lang, encodedSearchTerm)
+	// Search for possible results
+	searchResults, err := searchWikipedia(*lang, encodedSearchTerm)
 	if err != nil {
-		fmt.Println("Fehler bei der Suche:", err)
+		fmt.Println("Error during search:", err)
 		os.Exit(1)
 	}
 
 	if len(searchResults) == 0 {
-		fmt.Println("Keine Ergebnisse gefunden.")
+		fmt.Println("No results found.")
 		os.Exit(1)
 	}
 
@@ -209,19 +272,19 @@ func main() {
 	if len(searchResults) == 1 {
 		selectedTitle = searchResults[0]
 	} else {
-		selectedTitle = chooseResult(searchResults)
+		selectedTitle = chooseResult(searchResults, maxResults)
 	}
 
-	// Abrufen der Zusammenfassung für den ausgewählten Titel
-	summary, url, cached, err := getWikipediaSummary(lang, selectedTitle)
+	// Get the summary for the selected title
+	summary, url, cached, err := getWikipediaSummary(*lang, selectedTitle)
 	if err != nil {
-		color.Red("Fehler beim Abrufen der Zusammenfassung: %v", err)
+		color.Red("Error fetching summary: %v", err)
 		os.Exit(1)
 	}
 
-	color.Blue("\nZusammenfassung:")
+	color.Blue("\n\nSummary:")
 	if cached {
-		fmt.Print("(cached) ")
+		color.Yellow("(cached)")
 	}
 	fmt.Println(summary)
 	color.Green("\nURL:")
@@ -255,21 +318,24 @@ func searchWikipedia(lang, term string) ([]string, error) {
 	return titles, nil
 }
 
-func chooseResult(results []string) string {
-	fmt.Println("\nMehrere Ergebnisse gefunden. Bitte wählen Sie eines aus:")
+func chooseResult(results []string, maxResults *int) string {
+	if len(results) > *maxResults {
+		results = results[:*maxResults]
+	}
+	fmt.Println("\nMultiple results found. Please choose one:")
 	for i, result := range results {
 		fmt.Printf("%d. %s\n", i+1, result)
 	}
-	fmt.Println("q. Beenden")
+	fmt.Println("q. Quit")
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nGeben Sie die Nummer des gewünschten Ergebnisses ein (oder 'q' zum Beenden): ")
+		fmt.Println("\nEnter the number of the desired result (or 'q' to quit): ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
 		if input == "q" {
-			fmt.Println("\nProgramm wurde. beendet.")
+			fmt.Println("\nProgram was exited.")
 			os.Exit(0)
 		}
 
@@ -278,6 +344,24 @@ func chooseResult(results []string) string {
 		if err == nil && index > 0 && index <= len(results) {
 			return results[index-1]
 		}
-		fmt.Println("\nUngültige Eingabe. Bitte versuchen Sie es erneut.")
+		fmt.Println("\nInvalid input. Please try again.")
+	}
+}
+
+func createEmptyCacheFileIfNotExists() {
+	cachePath := getCachePath()
+	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
+		emptyCache := make(Cache)
+		data, err := json.Marshal(emptyCache)
+		if err != nil && debug {
+			fmt.Printf("Error creating empty cache file: %v\n", err)
+			return
+		}
+		err = os.WriteFile(cachePath, data, 0644)
+		if err != nil && debug {
+			fmt.Printf("Error writing empty cache file %s: %v\n", cachePath, err)
+		} else if debug {
+			fmt.Printf("Empty cache file was created: %s\n", cachePath)
+		}
 	}
 }

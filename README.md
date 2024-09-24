@@ -39,12 +39,18 @@ wikr [de|en] search term
 
 - `de` or `en` (optional): Selects the language (German or English). Default is German.
 - `search term`: The term or article title to search for.
+- `-max`: The maximum number of results to display. Default is 5.
+- `-clear-cache`: Clear the cache.
+- `-version`: Show version.
 
 ### Examples
 
 ```shell
 wikr Eiffelturm
 wikr en Albert Einstein
+wikr -max 3 Eiffelturm
+wikr -clear-cache
+wikr -version
 ```
 
 ## Cache
@@ -57,7 +63,7 @@ Wikr stores search results in a cache file (`.wikr_cache.json`) in the user's ho
 
 ## License
 
-[MIT Lizenz](LICENSE)
+[MIT License](LICENSE)
 
 ## Contributes
 
