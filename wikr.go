@@ -33,10 +33,6 @@ type CacheEntry struct {
 
 type Cache map[string]CacheEntry
 
-type Config struct {
-	MaxResults int
-}
-
 func getCachePath() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -116,7 +112,7 @@ func showLoadingAnimation(done chan bool) {
 		case <-done:
 			return
 		default:
-			fmt.Printf("\rLade Daten... %s", animation[i])
+			fmt.Printf("\rLoading data... %s", animation[i])
 			i = (i + 1) % len(animation)
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -208,10 +204,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s -clear-cache\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -version\n", os.Args[0])
 	}
+
 	lang := flag.String("lang", "de", "language of the Wikipedia")
 	maxResults := flag.Int("max", 5, "maximum amount of result entries")
 	isClearCache := flag.Bool("clear-cache", false, "clear cache and exit")
 	isVersion := flag.Bool("version", false, "show version")
+
 	flag.Parse()
 
 	if *isClearCache {
