@@ -116,7 +116,6 @@ func showLoadingAnimation(done chan bool) {
 		case <-done:
 			return
 		default:
-			fmt.Println()
 			fmt.Printf("\rLade Daten... %s", animation[i])
 			i = (i + 1) % len(animation)
 			time.Sleep(100 * time.Millisecond)
