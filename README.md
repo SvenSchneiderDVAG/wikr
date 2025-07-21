@@ -34,22 +34,24 @@ wikr is a simple command line tool that provides quick summaries of Wikipedia ar
 ## Usage
 
 ```shell
-wikr [de|en] search term
+wikr [en|de] search term
 ```
 
-- `de` or `en` (optional): Selects the language (German or English). Default is German.
+- `en` or `de` (optional): Selects the language (english or german). Default is english.
+- `-lang`: set search language to `en` or `de`
 - `search term`: The term or article title to search for.
 - `-max`: The maximum number of results to display. Default is 5.
-- `-clear-cache`: Clear the cache.
-- `-version`: Show version.
+- `-clearcache`: Clears the cache.
+- `-version`: Shows version.
 
 ### Examples
 
 ```shell
 wikr Eiffelturm
-wikr en Albert Einstein
+wikr en Einstein
+wike -lang de Aeinstein
 wikr -max 3 Eiffelturm
-wikr -clear-cache
+wikr -clearcache
 wikr -version
 ```
 
