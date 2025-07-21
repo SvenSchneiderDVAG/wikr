@@ -1,28 +1,29 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
-	"bufio"
-	"github.com/fatih/color"
 	"path/filepath"
-	"time"
+	"strings"
 	"sync"
-	"flag"
+	"time"
+
+	"github.com/fatih/color"
 )
 
 const (
-	wikipediaAPITemplate = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
+	wikipediaAPITemplate       = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
 	wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
-	cacheFileName = ".wikr_cache.json"
-	cacheDuration = 24 * time.Hour
-	debug = false
-	version = "0.1.0"
+	cacheFileName              = ".wikr_cache.json"
+	cacheDuration              = 24 * time.Hour
+	debug                      = false
+	version                    = "0.2.0"
 )
 
 type CacheEntry struct {
@@ -155,7 +156,7 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 		return "", "", false, err
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	err = json.Unmarshal(body, &result)
 	if err != nil {
 		close(done)
@@ -165,7 +166,7 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 	}
 
 	summary := result["extract"].(string)
-	url := result["content_urls"].(map[string]interface{})["desktop"].(map[string]interface{})["page"].(string)
+	url := result["content_urls"].(map[string]any)["desktop"].(map[string]any)["page"].(string)
 
 	// Shorten the summary to a maximum of 1000 characters
 	if len(summary) > 1000 {
@@ -201,13 +202,13 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -lang en -max 10 Golang\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -clear-cache\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -clearcache\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -version\n", os.Args[0])
 	}
 
 	lang := flag.String("lang", "de", "language of the Wikipedia")
 	maxResults := flag.Int("max", 5, "maximum amount of result entries")
-	isClearCache := flag.Bool("clear-cache", false, "clear cache and exit")
+	isClearCache := flag.Bool("clearcache", false, "clear cache and exit")
 	isVersion := flag.Bool("version", false, "show version")
 
 	flag.Parse()
@@ -223,10 +224,10 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-        fmt.Fprintf(os.Stderr, "Error: search term is required\n")
-        flag.Usage()
-        os.Exit(1)
-    }
+		fmt.Fprintf(os.Stderr, "Error: search term is required\n")
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	if *isVersion {
 		fmt.Println("Version:", version)
@@ -235,13 +236,14 @@ func main() {
 
 	var searchTermParts []string
 
-	if os.Args[1] == "de" || os.Args[1] == "en" {
-		*lang = os.Args[1]
-		searchTermParts = os.Args[2:]
-	} else if os.Args[1] == "-lang" {
+	switch os.Args[1] {
+	case "-lang":
 		*lang = os.Args[2]
 		searchTermParts = os.Args[3:]
-	} else {
+	case "de", "en":
+		*lang = os.Args[1]
+		searchTermParts = os.Args[2:]
+	default:
 		searchTermParts = os.Args[1:]
 	}
 
@@ -300,16 +302,16 @@ func searchWikipedia(lang, term string) ([]string, error) {
 		return nil, err
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	err = json.Unmarshal(body, &result)
 	if err != nil {
 		return nil, err
 	}
 
-	searchResults := result["query"].(map[string]interface{})["search"].([]interface{})
+	searchResults := result["query"].(map[string]any)["search"].([]any)
 	titles := make([]string, len(searchResults))
 	for i, item := range searchResults {
-		titles[i] = item.(map[string]interface{})["title"].(string)
+		titles[i] = item.(map[string]any)["title"].(string)
 	}
 
 	return titles, nil
