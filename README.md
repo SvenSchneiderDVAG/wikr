@@ -57,7 +57,7 @@ When you set a language or maximum number of results, it will be saved in a conf
 
 ```shell
 wikr Eiffelturm
-wike -lang de Einstein
+wikr -lang de Einstein
 wikr -max 3 Eiffelturm
 wikr -clearcache
 wikr -version
