@@ -20,8 +20,6 @@ import (
 const (
 	wikipediaAPITemplate       = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
 	wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
-	cacheFileName              = ".wikr_cache.json"
-	configFileName             = ".wikr_config.json"
 	cacheDuration              = 24 * time.Hour
 	debug                      = false
 	version                    = "0.4.0"
