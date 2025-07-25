@@ -7,86 +7,91 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	createEmptyCacheFileIfNotExists()
-
 	// Run tests
 	code := m.Run()
 
-	// Teardown
-	os.Remove(getCachePath())
+	// Teardown - clean up cache file if it exists
+	if cachePath, err := getCachePath(); err == nil {
+		os.Remove(cachePath)
+	}
 	os.Exit(code)
 }
 
 func TestGetCachePath(t *testing.T) {
-	path := getCachePath()
+	path, err := getCachePath()
+	if err != nil {
+		t.Errorf("getCachePath should not return an error: %v", err)
+	}
 	if path == "" {
-		t.Error("getCachePath sollte einen nicht-leeren Pfad zurückgeben")
+		t.Error("getCachePath should return a non-empty path")
 	}
 }
 
 func TestLoadAndSaveCache(t *testing.T) {
-	// Erstelle einen Test-Cache
+	// Create a test cache
 	testCache := Cache{
-		"de:Test": CacheEntry{
-			Summary:   "Dies ist ein Test",
-			URL:       "https://de.wikipedia.org/wiki/Test",
+		"en:Test": CacheEntry{
+			Summary:   "This is a test article.",
+			URL:       "https://en.wikipedia.org/wiki/Test",
 			Timestamp: time.Now(),
 		},
 	}
 
-	// Speichere den Test-Cache
+	// Save cache
 	saveCache(testCache)
 
-	// Lade den Cache
+	// Load the cache
 	loadedCache := loadCache()
 
-	// Überprüfe, ob der geladene Cache den Test-Eintrag enthält
-	entry, exists := loadedCache["de:Test"]
+	// Check if the loaded cache contains the test entry
+	entry, exists := loadedCache["en:Test"]
 	if !exists {
-		t.Error("Der geladene Cache sollte den Test-Eintrag enthalten")
+		t.Error("The loaded cache should contain the test entry")
 	}
 
-	if entry.Summary != "Dies ist ein Test" {
-		t.Errorf("Erwartete Zusammenfassung 'Dies ist ein Test', erhielt '%s'", entry.Summary)
+	if entry.Summary != "This is a test article." {
+		t.Errorf("Expected summary 'This is a test article.', got '%s'", entry.Summary)
 	}
 
-	// Lösche den Test-Eintrag aus dem Cache
-	delete(loadedCache, "de:Test")
+	// Delete the test entry from the cache
+	delete(loadedCache, "en:Test")
 	saveCache(loadedCache)
 }
 
 func TestGetAndSetCachedEntry(t *testing.T) {
-	// Setze einen Test-Eintrag
-	setCachedEntry("de", "TestArtikel", "Dies ist ein Test-Artikel", "https://de.wikipedia.org/wiki/TestArtikel")
+	// Set a test entry
+	setCachedEntry("en", "TestArticle", "This is a test article.", "https://en.wikipedia.org/wiki/TestArticle")
 
-	// Hole den Test-Eintrag
-	summary, url, found := getCachedEntry("de", "TestArtikel")
+	// Get the test entry
+	summary, url, found := getCachedEntry("en", "TestArticle")
 
 	if !found {
-		t.Error("Der Test-Eintrag sollte im Cache gefunden werden")
+		t.Error("The test entry should be found in the cache")
 	}
 
-	if summary != "Dies ist ein Test-Artikel" {
-		t.Errorf("Erwartete Zusammenfassung 'Dies ist ein Test-Artikel', erhielt '%s'", summary)
+	if summary != "This is a test article." {
+		t.Errorf("Expected summary 'This is a test article.', got '%s'", summary)
 	}
 
-	if url != "https://de.wikipedia.org/wiki/TestArtikel" {
-		t.Errorf("Erwartete URL 'https://de.wikipedia.org/wiki/TestArtikel', erhielt '%s'", url)
+	if url != "https://en.wikipedia.org/wiki/TestArticle" {
+		t.Errorf("Expected URL 'https://en.wikipedia.org/wiki/TestArticle', got '%s'", url)
 	}
 
-	// Lösche die Test-Cache-Datei
-	os.Remove(getCachePath())
+	// Clean up the test cache file
+	if cachePath, err := getCachePath(); err == nil {
+		os.Remove(cachePath)
+	}
 }
 
 func TestSearchWikipedia(t *testing.T) {
-	results, err := searchWikipedia("de", "Berlin")
+	results, err := searchWikipedia("en", "Berlin")
 
 	if err != nil {
-		t.Errorf("searchWikipedia sollte keinen Fehler zurückgeben: %v", err)
+		t.Errorf("searchWikipedia should not return an error: %v", err)
 	}
 
 	if len(results) == 0 {
-		t.Error("searchWikipedia sollte Ergebnisse für 'Berlin' zurückgeben")
+		t.Error("searchWikipedia should return results for 'Berlin'")
 	}
 
 	foundBerlin := false
@@ -98,37 +103,37 @@ func TestSearchWikipedia(t *testing.T) {
 	}
 
 	if !foundBerlin {
-		t.Error("'Berlin' sollte in den Suchergebnissen enthalten sein")
+		t.Error("'Berlin' should be included in the search results")
 	}
 }
 
 func TestGetWikipediaSummary(t *testing.T) {
-	summary, url, cached, err := getWikipediaSummary("de", "Berlin")
+	summary, url, cached, err := getWikipediaSummary("en", "Berlin")
 
 	if err != nil {
-		t.Errorf("getWikipediaSummary sollte keinen Fehler zurückgeben: %v", err)
+		t.Errorf("getWikipediaSummary should not return an error: %v", err)
 	}
 
 	if summary == "" {
-		t.Error("Die Zusammenfassung sollte nicht leer sein")
+		t.Error("The summary should not be empty")
 	}
 
 	if url == "" {
-		t.Error("Die URL sollte nicht leer sein")
+		t.Error("The URL should not be empty")
 	}
 
 	if cached {
-		t.Error("Der erste Aufruf sollte nicht aus dem Cache kommen")
+		t.Error("The first call should not come from cache")
 	}
 
-	// Zweiter Aufruf sollte aus dem Cache kommen
-	_, _, cached, _ = getWikipediaSummary("de", "Berlin")
+	// Second call should come from cache
+	_, _, cached, _ = getWikipediaSummary("en", "Berlin")
 	if !cached {
-		t.Error("Der zweite Aufruf sollte aus dem Cache kommen")
+		t.Error("The second call should come from cache")
 	}
 
-	// Lösche den Test-Eintrag aus dem Cache
+	// Delete the test entry from the cache
 	cache := loadCache()
-	delete(cache, "de:Berlin")
+	delete(cache, "en:Berlin")
 	saveCache(cache)
 }

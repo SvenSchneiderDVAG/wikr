@@ -1,14 +1,15 @@
 # wikr
 
-wikr is a simple command line tool that provides quick summaries of Wikipedia articles in German or English.
+wikr is a simple command line tool that provides quick summaries of Wikipedia articles in English or German.
 
 ## Features
 
 - Search for Wikipedia articles
 - Display article summaries directly in the console
-- Support for German and English Wikipedia
-- Caching of search results for faster access
+- Adds a link to the full article
+- Supports English and German Wikipedia
 - Interactive selection for multiple search results
+- Caching of search results for faster access
 
 ## Installation
 
@@ -31,25 +32,32 @@ wikr is a simple command line tool that provides quick summaries of Wikipedia ar
    go build
    ```
 
+5. Install the program:
+
+   ```shell
+   go install
+   ```
+
 ## Usage
 
 ```shell
-wikr [en|de] search term
+wikr [options] search term
 ```
 
-- `en` or `de` (optional): Selects the language (english or german). Default is english.
-- `-lang`: set search language to `en` or `de`
-- `search term`: The term or article title to search for.
-- `-max`: The maximum number of results to display. Default is 5.
-- `-clearcache`: Clears the cache.
-- `-version`: Shows version.
+### Options
+
+- `-lang` set search language to `en` or `de`, defaults to `en`
+- `-max` The maximum number of results to display, defaults to 5
+- `-clearcache` Clears the cache
+- `-version` Shows version
+
+When you set a language or maximum number of results, it will be saved in a config file for future use.
 
 ### Examples
 
 ```shell
 wikr Eiffelturm
-wikr en Einstein
-wike -lang de Aeinstein
+wikr -lang de Einstein
 wikr -max 3 Eiffelturm
 wikr -clearcache
 wikr -version
@@ -57,7 +65,7 @@ wikr -version
 
 ## Cache
 
-Wikr stores search results in a cache file (`.wikr_cache.json`) in the user's home directory. The cache is valid for 24 hours.
+Wikr stores search results in a cache file (`.wikr_cache.json`). The cache is valid for 24 hours.
 
 ## Dependencies
 
@@ -69,4 +77,4 @@ Wikr stores search results in a cache file (`.wikr_cache.json`) in the user's ho
 
 ## Contributes
 
-Contributes are welcome! Please open an Issue or a Pull Request for suggestions or bug fixes.
+Contributes are welcome! Please open an issue or a pull request for suggestions or bug fixes.

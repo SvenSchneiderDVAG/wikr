@@ -20,10 +20,9 @@ import (
 const (
 	wikipediaAPITemplate       = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
 	wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
-	cacheFileName              = ".wikr_cache.json"
 	cacheDuration              = 24 * time.Hour
 	debug                      = false
-	version                    = "0.2.0"
+	version                    = "0.4.0"
 )
 
 type CacheEntry struct {
@@ -34,18 +33,32 @@ type CacheEntry struct {
 
 type Cache map[string]CacheEntry
 
-func getCachePath() string {
-	homeDir, err := os.UserHomeDir()
+func getCachePath() (string, error) {
+	cacheDir, err := os.UserCacheDir()
 	if err != nil {
-		return cacheFileName
+		return "", fmt.Errorf("could not find cache directory: %w", err)
 	}
-	return filepath.Join(homeDir, cacheFileName)
+	wikrCacheDir := filepath.Join(cacheDir, "wikr")
+	if err := os.MkdirAll(wikrCacheDir, 0755); err != nil {
+		return "", fmt.Errorf("could not create cache directory: %w", err)
+	}
+	return filepath.Join(wikrCacheDir, "cache.json"), nil
 }
 
 func loadCache() Cache {
-	createEmptyCacheFileIfNotExists()
 	cache := make(Cache)
-	cachePath := getCachePath()
+	cachePath, err := getCachePath()
+	if err != nil {
+		if debug {
+			fmt.Printf("Error getting cache path: %v\n", err)
+		}
+		return cache
+	}
+
+	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
+		return cache // No cache file yet, return empty cache
+	}
+
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		if debug {
@@ -61,12 +74,18 @@ func loadCache() Cache {
 }
 
 func saveCache(cache Cache) {
+	cachePath, err := getCachePath()
+	if err != nil {
+		if debug {
+			fmt.Printf("Error getting cache path for saving: %v\n", err)
+		}
+		return
+	}
 	data, err := json.Marshal(cache)
 	if err != nil && debug {
 		fmt.Printf("Error encoding cache: %v\n", err)
 		return
 	}
-	cachePath := getCachePath()
 	err = os.WriteFile(cachePath, data, 0644)
 	if err != nil && debug {
 		fmt.Printf("Error writing cache file %s: %v\n", cachePath, err)
@@ -103,6 +122,68 @@ func setCachedEntry(lang, title, summary, url string) {
 		fmt.Printf("Save cache entry for key: %s\n", key)
 	}
 	saveCache(cache)
+}
+
+type Config struct {
+	Language   string `json:"language"`
+	MaxResults int    `json:"max_results"`
+}
+
+func getConfigPath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("could not find config directory: %w", err)
+	}
+	wikrConfigDir := filepath.Join(configDir, "wikr")
+	if err := os.MkdirAll(wikrConfigDir, 0755); err != nil {
+		return "", fmt.Errorf("could not create config directory: %w", err)
+	}
+	return filepath.Join(wikrConfigDir, "config.json"), nil
+}
+
+func loadConfig() (Config, error) {
+	config := Config{
+		Language:   "en",
+		MaxResults: 5,
+	}
+	configPath, err := getConfigPath()
+	if err != nil {
+		return config, err
+	}
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// Create a default config file if it doesn't exist
+		if err := saveConfig(config); err != nil {
+			return config, fmt.Errorf("could not create default config: %w", err)
+		}
+		return config, nil
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return config, fmt.Errorf("error reading config file %s: %w", configPath, err)
+	}
+
+	if err := json.Unmarshal(data, &config); err != nil {
+		return config, fmt.Errorf("error decoding config: %w", err)
+	}
+
+	return config, nil
+}
+
+func saveConfig(config Config) error {
+	configPath, err := getConfigPath()
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error encoding config: %w", err)
+	}
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		return fmt.Errorf("error writing config file %s: %w", configPath, err)
+	}
+	return nil
 }
 
 func showLoadingAnimation(done chan bool) {
@@ -184,8 +265,11 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 }
 
 func clearCache() error {
-	cachePath := getCachePath()
-	err := os.Remove(cachePath)
+	cachePath, err := getCachePath()
+	if err != nil {
+		return fmt.Errorf("error getting cache path: %w", err)
+	}
+	err = os.Remove(cachePath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("error deleting cache file: %v", err)
 	}
@@ -196,22 +280,52 @@ func clearCache() error {
 }
 
 func main() {
+	config, err := loadConfig()
+	if err != nil {
+		fmt.Printf("Warning: could not load config: %v\n", err)
+		// Set default values if config loading fails
+		config = Config{Language: "en", MaxResults: 5}
+	}
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <search term>\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -lang en -max 10 Golang\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -lang de -max 10 Golang\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -clearcache\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -version\n", os.Args[0])
 	}
 
-	lang := flag.String("lang", "de", "language of the Wikipedia")
-	maxResults := flag.Int("max", 5, "maximum amount of result entries")
-	isClearCache := flag.Bool("clearcache", false, "clear cache and exit")
+	lang := flag.String("lang", config.Language, "language of the Wikipedia to use")
+	maxResults := flag.Int("max", config.MaxResults, "maximum amount of result entries")
+	isClearCache := flag.Bool("clearcache", false, "clear the cache")
 	isVersion := flag.Bool("version", false, "show version")
 
 	flag.Parse()
+
+	// Update config if flags are set
+	configChanged := false
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "lang":
+			if *lang != config.Language {
+				config.Language = *lang
+				configChanged = true
+			}
+		case "max":
+			if *maxResults != config.MaxResults {
+				config.MaxResults = *maxResults
+				configChanged = true
+			}
+		}
+	})
+
+	if configChanged {
+		if err := saveConfig(config); err != nil {
+			fmt.Printf("Warning: could not save config: %v\n", err)
+		}
+	}
 
 	if *isClearCache {
 		err := clearCache()
@@ -219,14 +333,8 @@ func main() {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		fmt.Println("Cache cleared.")
+		fmt.Println("Cache cleared")
 		return
-	}
-
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Error: search term is required\n")
-		flag.Usage()
-		os.Exit(1)
 	}
 
 	if *isVersion {
@@ -234,25 +342,12 @@ func main() {
 		return
 	}
 
-	var searchTermParts []string
-
-	switch os.Args[1] {
-	case "-lang":
-		*lang = os.Args[2]
-		searchTermParts = os.Args[3:]
-	case "de", "en":
-		*lang = os.Args[1]
-		searchTermParts = os.Args[2:]
-	default:
-		searchTermParts = os.Args[1:]
-	}
-
-	if len(searchTermParts) == 0 {
-		fmt.Println("Please provide a search term.")
+	if len(flag.Args()) == 0 {
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	searchTerm := strings.Join(searchTermParts, " ")
+	searchTerm := strings.Join(flag.Args(), " ")
 	encodedSearchTerm := url.QueryEscape(searchTerm)
 
 	// Search for possible results
@@ -321,15 +416,17 @@ func chooseResult(results []string, maxResults *int) string {
 	if len(results) > *maxResults {
 		results = results[:*maxResults]
 	}
-	fmt.Println("\nMultiple results found. Please choose one:")
+	fmt.Print("\nMultiple results found. Please choose one:\n\n")
 	for i, result := range results {
 		fmt.Printf("%d. %s\n", i+1, result)
 	}
-	fmt.Println("q. Quit")
+	fmt.Println("\nq. quit")
 
 	reader := bufio.NewReader(os.Stdin)
+	color.Set(color.FgWhite, color.Bold)
 	for {
-		fmt.Println("\nEnter the number of the desired result (or 'q' to quit): ")
+		fmt.Print("\nEnter the number of the desired result (or 'q' to quit): ")
+		color.Unset()
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
@@ -344,23 +441,5 @@ func chooseResult(results []string, maxResults *int) string {
 			return results[index-1]
 		}
 		fmt.Println("\nInvalid input. Please try again.")
-	}
-}
-
-func createEmptyCacheFileIfNotExists() {
-	cachePath := getCachePath()
-	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
-		emptyCache := make(Cache)
-		data, err := json.Marshal(emptyCache)
-		if err != nil && debug {
-			fmt.Printf("Error creating empty cache file: %v\n", err)
-			return
-		}
-		err = os.WriteFile(cachePath, data, 0644)
-		if err != nil && debug {
-			fmt.Printf("Error writing empty cache file %s: %v\n", cachePath, err)
-		} else if debug {
-			fmt.Printf("Empty cache file was created: %s\n", cachePath)
-		}
 	}
 }
