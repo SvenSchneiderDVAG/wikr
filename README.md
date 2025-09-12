@@ -4,12 +4,15 @@ wikr is a simple command line tool that provides quick summaries of Wikipedia ar
 
 ## Features
 
-- Search for Wikipedia articles
-- Display article summaries directly in the console
-- Adds a link to the full article
-- Supports English and German Wikipedia
-- Interactive selection for multiple search results
-- Caching of search results for faster access
+- Search Wikipedia (English or German)
+- Interactive selection when multiple matches are returned
+- Summary extraction with link to full article
+- Two-layer caching:
+  - Search results (titles list)
+  - Article summaries (content + URL)
+- Config persistence (language + max results) with auto-correction on invalid values
+- Graceful offline/network failure fallback (uses cached search if available)
+- `-reset-config` to restore defaults quickly
 
 ## Installation
 
@@ -46,26 +49,35 @@ wikr [options] search term
 
 ### Options
 
-- `-lang` set search language to `en` or `de`, defaults to `en`
-- `-max` The maximum number of results to display, defaults to 5
-- `-clearcache` Clears the cache
-- `-version` Shows version
+| Flag            | Description                                                    |
+| --------------- | -------------------------------------------------------------- |
+| `-lang`         | Language (`en` or `de`), default from config (initially `en`). |
+| `-max`          | Max number of listed results (default 5, persisted).           |
+| `-clearcache`   | Clears summary cache only (search cache persists separately).  |
+| `-reset-config` | Regenerates config file with defaults (`en`, `5`) and exits.   |
+| `-version`      | Prints the version and exits.                                  |
 
-When you set a language or maximum number of results, it will be saved in a config file for future use.
+Changing `-lang` or `-max` updates the persisted config automatically. Invalid stored values are silently corrected and re-saved.
 
 ### Examples
 
 ```shell
-wikr Eiffelturm
-wikr -lang de Einstein
-wikr -max 3 Eiffelturm
+wikr golang
+wikr -lang de golang
+wikr -max 3 golang
 wikr -clearcache
+wikr -reset-config
 wikr -version
 ```
 
 ## Cache
 
-Wikr stores search results in a cache file (`.wikr_cache.json`). The cache is valid for 24 hours.
+Two caches (24h TTL each):
+
+- Summary cache: `cache.json` (per (lang:title) with summary + URL)
+- Search cache: `search_cache.json` (per (lang:query) with returned titles)
+
+If a network error occurs during search, a cached result (if present and still valid) is used and a warning is shown. Summaries are only fetched if not already cached.
 
 ## Dependencies
 
@@ -75,6 +87,6 @@ Wikr stores search results in a cache file (`.wikr_cache.json`). The cache is va
 
 [MIT License](LICENSE)
 
-## Contributes
+## Contributing
 
-Contributes are welcome! Please open an issue or a pull request for suggestions or bug fixes.
+Contributions are welcome. Feel free to open an issue or PR for enhancements, bug reports, offline mode ideas, or performance improvements.
