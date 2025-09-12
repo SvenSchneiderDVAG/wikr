@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/fatih/color"
@@ -23,7 +22,7 @@ const (
 	wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
 	cacheDuration              = 24 * time.Hour
 	debug                      = false
-	version                    = "0.5.0"
+	version                    = "0.6.0"
 	userAgent                  = "wikr/0"
 )
 
@@ -99,8 +98,6 @@ func saveCache(cache Cache) {
 		fmt.Printf("Error writing cache file %s: %v\n", cachePath, err)
 	}
 }
-
-// ---------- Search results cache (separate file) ----------
 
 func getSearchCachePath() (string, error) {
 	cacheDir, err := os.UserCacheDir()
@@ -252,72 +249,71 @@ func saveConfig(config Config) error {
 	return nil
 }
 
-func showLoadingAnimation(done chan bool) {
-	animation := []string{"|", "/", "-", "\\"}
-	i := 0
-	for {
-		select {
-		case <-done:
-			return
-		default:
-			fmt.Printf("\rLoading data... %s", animation[i])
-			i = (i + 1) % len(animation)
-			time.Sleep(100 * time.Millisecond)
+
+// httpGet performs an HTTP GET with retries and returns body, status, contentType.
+// Retries on network errors and selected transient HTTP statuses (429, 500-503).
+func httpGet(endpoint string) ([]byte, int, string, error) {
+	var lastErr error
+	backoff := 150 * time.Millisecond
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		if err != nil { return nil, 0, "", fmt.Errorf("create request: %w", err) }
+		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("Accept", "application/json; charset=utf-8")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("perform request: %w", err)
+		} else {
+			ct := resp.Header.Get("Content-Type")
+			body, rerr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if rerr != nil { return nil, resp.StatusCode, ct, fmt.Errorf("read body: %w", rerr) }
+			// Retry on transient HTTP codes
+			if resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 503) {
+				lastErr = fmt.Errorf("transient HTTP status %d", resp.StatusCode)
+			} else {
+				return body, resp.StatusCode, ct, nil
+			}
 		}
+		if attempt < maxAttempts { time.Sleep(backoff); backoff *= 2 }
 	}
-}
-
-// httpGet performs an HTTP GET with the fixed user agent and JSON accept headers.
-// It returns the response body, status code and error (if any). The caller is responsible
-// for interpreting non-200 status codes.
-func httpGet(endpoint string) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, 0, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "application/json; charset=utf-8")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("perform request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("read body: %w", err)
-	}
-	return body, resp.StatusCode, nil
+	return nil, 0, "", lastErr
 }
 
 // searchWikipedia queries the MediaWiki search API and returns a list of page titles.
 // The provided query argument is expected to already be URL-escaped.
 func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
-    // Try cache first
-    if titles, ok := getCachedSearch(lang, escapedQuery); ok {
-        return titles, true, nil
-    }
-    endpoint := fmt.Sprintf(wikipediaSearchAPITemplate, lang, escapedQuery)
-    body, status, err := httpGet(endpoint)
-    if err != nil {
-        return nil, false, err
-    }
-    if status != http.StatusOK {
-        return nil, false, fmt.Errorf("unexpected status %d from search endpoint", status)
-    }
-    var payload struct {
-        Query struct {
-            Search []struct { Title string `json:"title"` } `json:"search"`
-        } `json:"query"`
-    }
-    if err := json.Unmarshal(body, &payload); err != nil {
-        return nil, false, fmt.Errorf("decode search JSON: %w", err)
-    }
-    titles := make([]string, 0, len(payload.Query.Search))
-    for _, s := range payload.Query.Search { if s.Title != "" { titles = append(titles, s.Title) } }
-    if len(titles) > 0 { setCachedSearch(lang, escapedQuery, titles) }
-    return titles, false, nil
+	if titles, ok := getCachedSearch(lang, escapedQuery); ok { return titles, true, nil }
+	endpoint := fmt.Sprintf(wikipediaSearchAPITemplate, lang, escapedQuery)
+	body, status, ct, err := httpGet(endpoint)
+	if err != nil { return nil, false, err }
+	if status != http.StatusOK { return nil, false, fmt.Errorf("unexpected status %d from search endpoint", status) }
+	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+		if titles, ok := getCachedSearch(lang, escapedQuery); ok {
+			if debug { fmt.Printf("Non-JSON Content-Type '%s' for search; using cache fallback.\n", ct) }
+			return titles, true, nil
+		}
+		return nil, false, fmt.Errorf("unexpected content-type '%s' (expected application/json)", ct)
+	}
+	var payload struct {
+		Query struct {
+			Search []struct {
+				Title string `json:"title"`
+			} `json:"search"`
+		} `json:"query"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		if titles, ok := getCachedSearch(lang, escapedQuery); ok {
+			if debug { fmt.Printf("Malformed JSON for search; using cache fallback: %v\n", err) }
+			return titles, true, nil
+		}
+		return nil, false, fmt.Errorf("decode search JSON: %w", err)
+	}
+	titles := make([]string, 0, len(payload.Query.Search))
+	for _, s := range payload.Query.Search { if s.Title != "" { titles = append(titles, s.Title) } }
+	if len(titles) > 0 { setCachedSearch(lang, escapedQuery, titles) }
+	return titles, false, nil
 }
 
 // chooseResult lets the user pick one of the returned titles when more than one
@@ -329,6 +325,7 @@ func chooseResult(results []string, maxResults *int) string {
 	if limit <= 0 || limit > len(results) {
 		limit = len(results)
 	}
+	fmt.Println()
 	color.Cyan("Multiple results found (showing %d of %d):", limit, len(results))
 	for i := 0; i < limit; i++ {
 		fmt.Printf("  [%d] %s\n", i+1, results[i])
@@ -353,44 +350,21 @@ func chooseResult(results []string, maxResults *int) string {
 }
 
 func getWikipediaSummary(lang, title string) (string, string, bool, error) {
-	done := make(chan bool)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() { defer wg.Done(); showLoadingAnimation(done) }()
-
-	// Try cache first
-	if summary, urlStr, found := getCachedEntry(lang, title); found {
-		close(done); wg.Wait(); fmt.Print("\r")
-		return summary, urlStr, true, nil
-	}
-
+	if summary, urlStr, found := getCachedEntry(lang, title); found { return summary, urlStr, true, nil }
 	endpoint := fmt.Sprintf(wikipediaAPITemplate, lang) + url.PathEscape(title)
-	body, status, err := httpGet(endpoint)
-	if err != nil { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, err }
-	if status != http.StatusOK {
-		close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, fmt.Errorf("unexpected status %d from summary endpoint", status)
-	}
-
+	body, status, ct, err := httpGet(endpoint)
+	if err != nil { return "", "", false, err }
+	if status != http.StatusOK { return "", "", false, fmt.Errorf("unexpected status %d from summary endpoint", status) }
+	if !strings.HasPrefix(strings.ToLower(ct), "application/json") { return "", "", false, fmt.Errorf("unexpected content-type '%s'", ct) }
 	var result map[string]any
-	if err := json.Unmarshal(body, &result); err != nil {
-		close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, fmt.Errorf("decode summary JSON: %w", err)
-	}
-
-	extractVal, ok := result["extract"]
-	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("missing 'extract' in response") }
-	extractStr, ok := extractVal.(string)
-	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("'extract' field not a string") }
-
-	contentURLs, ok := result["content_urls"].(map[string]any)
-	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("missing content_urls") }
-	desktop, ok := contentURLs["desktop"].(map[string]any)
-	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("missing desktop in content_urls") }
+	if err := json.Unmarshal(body, &result); err != nil { return "", "", false, fmt.Errorf("decode summary JSON: %w", err) }
+	extractVal, ok := result["extract"]; if !ok { return "", "", false, errors.New("missing 'extract' in response") }
+	extractStr, ok := extractVal.(string); if !ok { return "", "", false, errors.New("'extract' field not a string") }
+	contentURLs, ok := result["content_urls"].(map[string]any); if !ok { return "", "", false, errors.New("missing content_urls") }
+	desktop, ok := contentURLs["desktop"].(map[string]any); if !ok { return "", "", false, errors.New("missing desktop in content_urls") }
 	pageURL, ok := desktop["page"].(string)
-	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("missing page URL") }
-
+	if !ok { return "", "", false, errors.New("missing page URL") }
 	if len(extractStr) > 1000 { extractStr = extractStr[:997] + "..." }
-
-	close(done); wg.Wait(); fmt.Print("\r")
 	setCachedEntry(lang, title, extractStr, pageURL)
 	return extractStr, pageURL, false, nil
 }
