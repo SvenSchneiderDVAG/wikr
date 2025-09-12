@@ -296,7 +296,13 @@ func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
 		}
 		return nil, false, fmt.Errorf("unexpected content-type '%s' (expected application/json)", ct)
 	}
-	var payload struct { Query struct { Search []struct { Title string `json:"title"` } `json:"search"` } `json:"query"` }
+	var payload struct {
+		Query struct {
+			Search []struct {
+				Title string `json:"title"`
+			} `json:"search"`
+		} `json:"query"`
+	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		if titles, ok := getCachedSearch(lang, escapedQuery); ok {
 			if debug { fmt.Printf("Malformed JSON for search; using cache fallback: %v\n", err) }
