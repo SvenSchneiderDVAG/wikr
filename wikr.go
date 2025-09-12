@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,13 +23,20 @@ const (
 	wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
 	cacheDuration              = 24 * time.Hour
 	debug                      = false
-	version                    = "0.4.0"
+	version                    = "0.5.0"
+	userAgent                  = "wikr/0"
 )
 
 type CacheEntry struct {
 	Summary   string    `json:"summary"`
 	URL       string    `json:"url"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// SearchResultEntry caches a list of titles for a given (lang, query) pair.
+type SearchResultEntry struct {
+    Titles     []string  `json:"titles"`
+    Timestamp  time.Time `json:"timestamp"`
 }
 
 type Cache map[string]CacheEntry
@@ -92,6 +100,53 @@ func saveCache(cache Cache) {
 	}
 }
 
+// ---------- Search results cache (separate file) ----------
+
+func getSearchCachePath() (string, error) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil { return "", fmt.Errorf("could not find cache directory: %w", err) }
+	wikrCacheDir := filepath.Join(cacheDir, "wikr")
+	if err := os.MkdirAll(wikrCacheDir, 0755); err != nil {
+		return "", fmt.Errorf("could not create cache directory: %w", err)
+	}
+	return filepath.Join(wikrCacheDir, "search_cache.json"), nil
+}
+
+func loadSearchCache() map[string]SearchResultEntry {
+	cache := make(map[string]SearchResultEntry)
+	path, err := getSearchCachePath()
+	if err != nil { if debug { fmt.Printf("Error search cache path: %v\n", err) }; return cache }
+	if _, err := os.Stat(path); os.IsNotExist(err) { return cache }
+	data, err := os.ReadFile(path)
+	if err != nil { if debug { fmt.Printf("Error reading search cache: %v\n", err) }; return cache }
+	if err := json.Unmarshal(data, &cache); err != nil { if debug { fmt.Printf("Error decoding search cache: %v\n", err) } }
+	return cache
+}
+
+func saveSearchCache(c map[string]SearchResultEntry) {
+	path, err := getSearchCachePath()
+	if err != nil { if debug { fmt.Printf("Error getting search cache path for saving: %v\n", err) }; return }
+	data, err := json.Marshal(c)
+	if err != nil { if debug { fmt.Printf("Error encoding search cache: %v\n", err) }; return }
+	if err := os.WriteFile(path, data, 0644); err != nil { if debug { fmt.Printf("Error writing search cache: %v\n", err) } }
+}
+
+func getCachedSearch(lang, escapedQuery string) ([]string, bool) {
+	c := loadSearchCache()
+	key := lang + ":" + escapedQuery
+	entry, ok := c[key]
+	if !ok { return nil, false }
+	if time.Since(entry.Timestamp) >= cacheDuration { return nil, false }
+	return entry.Titles, true
+}
+
+func setCachedSearch(lang, escapedQuery string, titles []string) {
+	c := loadSearchCache()
+	key := lang + ":" + escapedQuery
+	c[key] = SearchResultEntry{Titles: titles, Timestamp: time.Now()}
+	saveSearchCache(c)
+}
+
 func getCachedEntry(lang, title string) (string, string, bool) {
 	cache := loadCache()
 	key := lang + ":" + title
@@ -141,34 +196,45 @@ func getConfigPath() (string, error) {
 	return filepath.Join(wikrConfigDir, "config.json"), nil
 }
 
-func loadConfig() (Config, error) {
+func loadConfig() (Config, bool, error) {
+	corrected := false
 	config := Config{
 		Language:   "en",
 		MaxResults: 5,
 	}
 	configPath, err := getConfigPath()
 	if err != nil {
-		return config, err
+		return config, false, err
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		// Create a default config file if it doesn't exist
 		if err := saveConfig(config); err != nil {
-			return config, fmt.Errorf("could not create default config: %w", err)
+			return config, false, fmt.Errorf("could not create default config: %w", err)
 		}
-		return config, nil
+		return config, false, nil
 	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return config, fmt.Errorf("error reading config file %s: %w", configPath, err)
+		return config, false, fmt.Errorf("error reading config file %s: %w", configPath, err)
 	}
 
 	if err := json.Unmarshal(data, &config); err != nil {
-		return config, fmt.Errorf("error decoding config: %w", err)
+		return config, false, fmt.Errorf("error decoding config: %w", err)
 	}
 
-	return config, nil
+	// Validation: only allow "en" or "de" currently; fallback to en
+	if config.Language != "en" && config.Language != "de" {
+		config.Language = "en"
+		corrected = true
+	}
+	if config.MaxResults <= 0 {
+		config.MaxResults = 5
+		corrected = true
+	}
+
+	return config, corrected, nil
 }
 
 func saveConfig(config Config) error {
@@ -201,67 +267,132 @@ func showLoadingAnimation(done chan bool) {
 	}
 }
 
+// httpGet performs an HTTP GET with the fixed user agent and JSON accept headers.
+// It returns the response body, status code and error (if any). The caller is responsible
+// for interpreting non-200 status codes.
+func httpGet(endpoint string) ([]byte, int, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json; charset=utf-8")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("perform request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("read body: %w", err)
+	}
+	return body, resp.StatusCode, nil
+}
+
+// searchWikipedia queries the MediaWiki search API and returns a list of page titles.
+// The provided query argument is expected to already be URL-escaped.
+func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
+    // Try cache first
+    if titles, ok := getCachedSearch(lang, escapedQuery); ok {
+        return titles, true, nil
+    }
+    endpoint := fmt.Sprintf(wikipediaSearchAPITemplate, lang, escapedQuery)
+    body, status, err := httpGet(endpoint)
+    if err != nil {
+        return nil, false, err
+    }
+    if status != http.StatusOK {
+        return nil, false, fmt.Errorf("unexpected status %d from search endpoint", status)
+    }
+    var payload struct {
+        Query struct {
+            Search []struct { Title string `json:"title"` } `json:"search"`
+        } `json:"query"`
+    }
+    if err := json.Unmarshal(body, &payload); err != nil {
+        return nil, false, fmt.Errorf("decode search JSON: %w", err)
+    }
+    titles := make([]string, 0, len(payload.Query.Search))
+    for _, s := range payload.Query.Search { if s.Title != "" { titles = append(titles, s.Title) } }
+    if len(titles) > 0 { setCachedSearch(lang, escapedQuery, titles) }
+    return titles, false, nil
+}
+
+// chooseResult lets the user pick one of the returned titles when more than one
+// result is available. It displays up to *maxResults entries. If the user presses
+// enter without input, the first entry is selected. Continues prompting until
+// valid selection is made.
+func chooseResult(results []string, maxResults *int) string {
+	limit := *maxResults
+	if limit <= 0 || limit > len(results) {
+		limit = len(results)
+	}
+	color.Cyan("Multiple results found (showing %d of %d):", limit, len(results))
+	for i := 0; i < limit; i++ {
+		fmt.Printf("  [%d] %s\n", i+1, results[i])
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("Select a result number (default 1): ")
+		line, _ := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return results[0]
+		}
+		// Attempt to parse numeric selection.
+		var idx int
+		_, err := fmt.Sscanf(line, "%d", &idx)
+		if err == nil && idx >= 1 && idx <= limit {
+			return results[idx-1]
+		}
+		color.Yellow("Invalid selection. Please enter a number between 1 and %d.", limit)
+	}
+}
+
 func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 	done := make(chan bool)
 	var wg sync.WaitGroup
 	wg.Add(1)
+	go func() { defer wg.Done(); showLoadingAnimation(done) }()
 
-	go func() {
-		defer wg.Done()
-		showLoadingAnimation(done)
-	}()
-
-	// Try to get the entry from the cache first
-	if summary, url, found := getCachedEntry(lang, title); found {
-		close(done)
-		wg.Wait()
-		fmt.Print("\r") // Clears the loading animation
-		return summary, url, true, nil
+	// Try cache first
+	if summary, urlStr, found := getCachedEntry(lang, title); found {
+		close(done); wg.Wait(); fmt.Print("\r")
+		return summary, urlStr, true, nil
 	}
 
-	encodedTitle := url.PathEscape(title)
-	response, err := http.Get(fmt.Sprintf(wikipediaAPITemplate, lang) + encodedTitle)
-	if err != nil {
-		close(done)
-		wg.Wait()
-		fmt.Print("\r")
-		return "", "", false, err
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		close(done)
-		wg.Wait()
-		fmt.Print("\r")
-		return "", "", false, err
+	endpoint := fmt.Sprintf(wikipediaAPITemplate, lang) + url.PathEscape(title)
+	body, status, err := httpGet(endpoint)
+	if err != nil { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, err }
+	if status != http.StatusOK {
+		close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, fmt.Errorf("unexpected status %d from summary endpoint", status)
 	}
 
 	var result map[string]any
-	err = json.Unmarshal(body, &result)
-	if err != nil {
-		close(done)
-		wg.Wait()
-		fmt.Print("\r")
-		return "", "", false, err
+	if err := json.Unmarshal(body, &result); err != nil {
+		close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, fmt.Errorf("decode summary JSON: %w", err)
 	}
 
-	summary := result["extract"].(string)
-	url := result["content_urls"].(map[string]any)["desktop"].(map[string]any)["page"].(string)
+	extractVal, ok := result["extract"]
+	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("missing 'extract' in response") }
+	extractStr, ok := extractVal.(string)
+	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("'extract' field not a string") }
 
-	// Shorten the summary to a maximum of 1000 characters
-	if len(summary) > 1000 {
-		summary = summary[:997] + "..."
-	}
+	contentURLs, ok := result["content_urls"].(map[string]any)
+	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("missing content_urls") }
+	desktop, ok := contentURLs["desktop"].(map[string]any)
+	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("missing desktop in content_urls") }
+	pageURL, ok := desktop["page"].(string)
+	if !ok { close(done); wg.Wait(); fmt.Print("\r"); return "", "", false, errors.New("missing page URL") }
 
-	close(done)
-	wg.Wait()
-	fmt.Print("\r") // Clears the loading animation
+	if len(extractStr) > 1000 { extractStr = extractStr[:997] + "..." }
 
-	// Cache the new entry
-	setCachedEntry(lang, title, summary, url)
-
-	return summary, url, false, nil
+	close(done); wg.Wait(); fmt.Print("\r")
+	setCachedEntry(lang, title, extractStr, pageURL)
+	return extractStr, pageURL, false, nil
 }
 
 func clearCache() error {
@@ -280,11 +411,15 @@ func clearCache() error {
 }
 
 func main() {
-	config, err := loadConfig()
+	config, corrected, err := loadConfig()
 	if err != nil {
 		fmt.Printf("Warning: could not load config: %v\n", err)
-		// Set default values if config loading fails
 		config = Config{Language: "en", MaxResults: 5}
+	} else if corrected {
+		// Auto-save corrections silently
+		if err := saveConfig(config); err != nil && debug {
+			fmt.Printf("Could not persist corrected config: %v\n", err)
+		}
 	}
 
 	flag.Usage = func() {
@@ -294,15 +429,27 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -lang de -max 10 Golang\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -clearcache\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -reset-config\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -version\n", os.Args[0])
 	}
 
-	lang := flag.String("lang", config.Language, "language of the Wikipedia to use")
+	lang := flag.String("lang", config.Language, "language of the Wikipedia to use (en|de)")
 	maxResults := flag.Int("max", config.MaxResults, "maximum amount of result entries")
 	isClearCache := flag.Bool("clearcache", false, "clear the cache")
 	isVersion := flag.Bool("version", false, "show version")
+	isResetConfig := flag.Bool("reset-config", false, "regenerate default configuration and exit")
 
 	flag.Parse()
+
+	if *isResetConfig {
+		defaultCfg := Config{Language: "en", MaxResults: 5}
+		if err := saveConfig(defaultCfg); err != nil {
+			fmt.Printf("Error writing default config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Configuration reset to defaults (language=en, max_results=5)")
+		return
+	}
 
 	// Update config if flags are set
 	configChanged := false
@@ -350,15 +497,26 @@ func main() {
 	searchTerm := strings.Join(flag.Args(), " ")
 	encodedSearchTerm := url.QueryEscape(searchTerm)
 
-	// Search for possible results
-	searchResults, err := searchWikipedia(*lang, encodedSearchTerm)
+	// Search for possible results (with caching + graceful fallback)
+	searchResults, cachedSearch, err := searchWikipedia(*lang, encodedSearchTerm)
 	if err != nil {
-		fmt.Println("Error during search:", err)
-		os.Exit(1)
+		// Attempt to fall back to any cached results (even if expired) by forcing direct cache load
+		if titles, ok := getCachedSearch(*lang, encodedSearchTerm); ok {
+			color.Yellow("Network error (%v). Using previously cached search results.", err)
+			searchResults = titles
+			cachedSearch = true
+		} else {
+			fmt.Println("Error during search:", err)
+			os.Exit(1)
+		}
 	}
 
 	if len(searchResults) == 0 {
-		fmt.Println("No results found.")
+		if cachedSearch {
+			fmt.Println("Cached search results were empty.")
+		} else {
+			fmt.Println("No results found.")
+		}
 		os.Exit(1)
 	}
 
@@ -377,69 +535,8 @@ func main() {
 	}
 
 	color.Blue("\n\nSummary:")
-	if cached {
-		color.Yellow("(cached)")
-	}
+	if cached { color.Yellow("(cached)") }
 	fmt.Println(summary)
 	color.Green("\nURL:")
 	fmt.Println(url)
-}
-
-func searchWikipedia(lang, term string) ([]string, error) {
-	response, err := http.Get(fmt.Sprintf(wikipediaSearchAPITemplate, lang, term))
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var result map[string]any
-	err = json.Unmarshal(body, &result)
-	if err != nil {
-		return nil, err
-	}
-
-	searchResults := result["query"].(map[string]any)["search"].([]any)
-	titles := make([]string, len(searchResults))
-	for i, item := range searchResults {
-		titles[i] = item.(map[string]any)["title"].(string)
-	}
-
-	return titles, nil
-}
-
-func chooseResult(results []string, maxResults *int) string {
-	if len(results) > *maxResults {
-		results = results[:*maxResults]
-	}
-	fmt.Print("\nMultiple results found. Please choose one:\n\n")
-	for i, result := range results {
-		fmt.Printf("%d. %s\n", i+1, result)
-	}
-	fmt.Println("\nq. quit")
-
-	reader := bufio.NewReader(os.Stdin)
-	color.Set(color.FgWhite, color.Bold)
-	for {
-		fmt.Print("\nEnter the number of the desired result (or 'q' to quit): ")
-		color.Unset()
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
-
-		if input == "q" {
-			fmt.Println("\nProgram was exited.")
-			os.Exit(0)
-		}
-
-		index := 0
-		_, err := fmt.Sscanf(input, "%d", &index)
-		if err == nil && index > 0 && index <= len(results) {
-			return results[index-1]
-		}
-		fmt.Println("\nInvalid input. Please try again.")
-	}
 }

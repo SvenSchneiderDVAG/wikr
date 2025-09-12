@@ -1,18 +1,18 @@
 package main
 
 import (
-	"testing"
 	"os"
+	"testing"
 	"time"
 )
 
 func TestMain(m *testing.M) {
-	// Run tests
 	code := m.Run()
-
-	// Teardown - clean up cache file if it exists
 	if cachePath, err := getCachePath(); err == nil {
 		os.Remove(cachePath)
+	}
+	if searchCachePath, err := getSearchCachePath(); err == nil {
+		os.Remove(searchCachePath)
 	}
 	os.Exit(code)
 }
@@ -28,7 +28,6 @@ func TestGetCachePath(t *testing.T) {
 }
 
 func TestLoadAndSaveCache(t *testing.T) {
-	// Create a test cache
 	testCache := Cache{
 		"en:Test": CacheEntry{
 			Summary:   "This is a test article.",
@@ -36,14 +35,8 @@ func TestLoadAndSaveCache(t *testing.T) {
 			Timestamp: time.Now(),
 		},
 	}
-
-	// Save cache
 	saveCache(testCache)
-
-	// Load the cache
 	loadedCache := loadCache()
-
-	// Check if the loaded cache contains the test entry
 	entry, exists := loadedCache["en:Test"]
 	if !exists {
 		t.Error("The loaded cache should contain the test entry")
@@ -53,16 +46,12 @@ func TestLoadAndSaveCache(t *testing.T) {
 		t.Errorf("Expected summary 'This is a test article.', got '%s'", entry.Summary)
 	}
 
-	// Delete the test entry from the cache
 	delete(loadedCache, "en:Test")
 	saveCache(loadedCache)
 }
 
 func TestGetAndSetCachedEntry(t *testing.T) {
-	// Set a test entry
 	setCachedEntry("en", "TestArticle", "This is a test article.", "https://en.wikipedia.org/wiki/TestArticle")
-
-	// Get the test entry
 	summary, url, found := getCachedEntry("en", "TestArticle")
 
 	if !found {
@@ -77,14 +66,13 @@ func TestGetAndSetCachedEntry(t *testing.T) {
 		t.Errorf("Expected URL 'https://en.wikipedia.org/wiki/TestArticle', got '%s'", url)
 	}
 
-	// Clean up the test cache file
 	if cachePath, err := getCachePath(); err == nil {
 		os.Remove(cachePath)
 	}
 }
 
 func TestSearchWikipedia(t *testing.T) {
-	results, err := searchWikipedia("en", "Berlin")
+	results, cached, err := searchWikipedia("en", "Berlin")
 
 	if err != nil {
 		t.Errorf("searchWikipedia should not return an error: %v", err)
@@ -94,9 +82,10 @@ func TestSearchWikipedia(t *testing.T) {
 		t.Error("searchWikipedia should return results for 'Berlin'")
 	}
 
+	_ = cached
 	foundBerlin := false
-	for _, result := range results {
-		if result == "Berlin" {
+	for _, r := range results {
+		if r == "Berlin" {
 			foundBerlin = true
 			break
 		}
@@ -126,13 +115,10 @@ func TestGetWikipediaSummary(t *testing.T) {
 		t.Error("The first call should not come from cache")
 	}
 
-	// Second call should come from cache
 	_, _, cached, _ = getWikipediaSummary("en", "Berlin")
 	if !cached {
 		t.Error("The second call should come from cache")
 	}
-
-	// Delete the test entry from the cache
 	cache := loadCache()
 	delete(cache, "en:Berlin")
 	saveCache(cache)
