@@ -22,7 +22,7 @@ const (
 	wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
 	cacheDuration              = 24 * time.Hour
 	debug                      = false
-	version                    = "0.5.0"
+	version                    = "0.6.0"
 	userAgent                  = "wikr/0"
 )
 
