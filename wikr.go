@@ -356,7 +356,8 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 	extractStr, ok := extractVal.(string); if !ok { return "", "", false, errors.New("'extract' field not a string") }
 	contentURLs, ok := result["content_urls"].(map[string]any); if !ok { return "", "", false, errors.New("missing content_urls") }
 	desktop, ok := contentURLs["desktop"].(map[string]any); if !ok { return "", "", false, errors.New("missing desktop in content_urls") }
-	pageURL, ok := desktop["page"].(string); if !ok { return "", "", false, errors.New("missing page URL") }
+	pageURL, ok := desktop["page"].(string)
+	if !ok { return "", "", false, errors.New("missing page URL") }
 	if len(extractStr) > 1000 { extractStr = extractStr[:997] + "..." }
 	setCachedEntry(lang, title, extractStr, pageURL)
 	return extractStr, pageURL, false, nil
