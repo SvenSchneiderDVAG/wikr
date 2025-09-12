@@ -53,7 +53,7 @@ wikr [options] search term
 | --------------- | -------------------------------------------------------------- |
 | `-lang`         | Language (`en` or `de`), default from config (initially `en`). |
 | `-max`          | Max number of listed results (default 5, persisted).           |
-| `-clearcache`   | Clears summary cache only (search cache persists separately).  |
+| `-clear-cache`  | Clears summary cache only (search cache persists separately).  |
 | `-reset-config` | Regenerates config file with defaults (`en`, `5`) and exits.   |
 | `-version`      | Prints the version and exits.                                  |
 
@@ -65,7 +65,7 @@ Changing `-lang` or `-max` updates the persisted config automatically. Invalid s
 wikr golang
 wikr -lang de golang
 wikr -max 3 golang
-wikr -clearcache
+wikr -clear-cache
 wikr -reset-config
 wikr -version
 ```
