@@ -21,9 +21,16 @@ const (
 	wikipediaAPITemplate       = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
 	wikipediaSearchAPITemplate = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
 	cacheDuration              = 24 * time.Hour
-	debug                      = false
-	version                    = "0.6.0"
-	userAgent                  = "wikr/0"
+	version                    = "0.6.1"
+)
+
+// debug is a runtime variable (was const) so tests can toggle it to cover debug print branches.
+var debug = false
+
+var (
+    userAgent = "wikr/" + version + " (+https://github.com/SvenSchneiderDVAG/wikr)"
+	// httpGetFunc allows tests to inject a mock for network calls.
+	httpGetFunc = httpGet
 )
 
 type CacheEntry struct {
@@ -282,11 +289,10 @@ func httpGet(endpoint string) ([]byte, int, string, error) {
 }
 
 // searchWikipedia queries the MediaWiki search API and returns a list of page titles.
-// The provided query argument is expected to already be URL-escaped.
 func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
 	if titles, ok := getCachedSearch(lang, escapedQuery); ok { return titles, true, nil }
 	endpoint := fmt.Sprintf(wikipediaSearchAPITemplate, lang, escapedQuery)
-	body, status, ct, err := httpGet(endpoint)
+	body, status, ct, err := httpGetFunc(endpoint)
 	if err != nil { return nil, false, err }
 	if status != http.StatusOK { return nil, false, fmt.Errorf("unexpected status %d from search endpoint", status) }
 	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
@@ -317,23 +323,30 @@ func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
 }
 
 // chooseResult lets the user pick one of the returned titles when more than one
-// result is available. It displays up to *maxResults entries. If the user presses
-// enter without input, the first entry is selected. Continues prompting until
-// valid selection is made.
-func chooseResult(results []string, maxResults *int) string {
+// result is available.
+func chooseResult(results []string, maxResults *int, lang string) string {
 	limit := *maxResults
 	if limit <= 0 || limit > len(results) {
 		limit = len(results)
 	}
 	fmt.Println()
-	color.Cyan("Multiple results found (showing %d of %d):", limit, len(results))
+	if lang == "de" {
+		color.Cyan("Mehrere Ergebnisse gefunden (zeige %d von %d):", limit, len(results))
+	} else {
+		color.Cyan("Multiple results found (showing %d of %d):", limit, len(results))
+	}
 	for i := 0; i < limit; i++ {
 		fmt.Printf("  [%d] %s\n", i+1, results[i])
 	}
+	fmt.Println()
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("Select a result number (default 1): ")
+		if lang == "de" {
+			fmt.Print("Bitte eine Nummer auswählen (Standard 1): ")
+		} else {
+			fmt.Print("Select a result number (default 1): ")
+		}
 		line, _ := reader.ReadString('\n')
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -345,14 +358,18 @@ func chooseResult(results []string, maxResults *int) string {
 		if err == nil && idx >= 1 && idx <= limit {
 			return results[idx-1]
 		}
-		color.Yellow("Invalid selection. Please enter a number between 1 and %d.", limit)
+		if lang == "de" {
+			color.Yellow("Ungültige Auswahl. Bitte eine Zahl zwischen 1 und %d eingeben.", limit)
+		} else {
+			color.Yellow("Invalid selection. Please enter a number between 1 and %d.", limit)
+		}
 	}
 }
 
 func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 	if summary, urlStr, found := getCachedEntry(lang, title); found { return summary, urlStr, true, nil }
 	endpoint := fmt.Sprintf(wikipediaAPITemplate, lang) + url.PathEscape(title)
-	body, status, ct, err := httpGet(endpoint)
+	body, status, ct, err := httpGetFunc(endpoint)
 	if err != nil { return "", "", false, err }
 	if status != http.StatusOK { return "", "", false, fmt.Errorf("unexpected status %d from summary endpoint", status) }
 	if !strings.HasPrefix(strings.ToLower(ct), "application/json") { return "", "", false, fmt.Errorf("unexpected content-type '%s'", ct) }
@@ -384,133 +401,131 @@ func clearCache() error {
 	return nil
 }
 
-func main() {
+// run encapsulates the CLI logic; args should exclude the program name (like os.Args[1:]).
+// It writes user-facing output to out and returns an exit code (0 success, >0 failure).
+func run(out io.Writer, args []string) int {
+	// Ensure color output goes to out if it's stdout; we keep using global color functions.
 	config, corrected, err := loadConfig()
 	if err != nil {
-		fmt.Printf("Warning: could not load config: %v\n", err)
+		fmt.Fprintf(out, "Warning: could not load config: %v\n", err)
 		config = Config{Language: "en", MaxResults: 5}
 	} else if corrected {
-		// Auto-save corrections silently
 		if err := saveConfig(config); err != nil && debug {
-			fmt.Printf("Could not persist corrected config: %v\n", err)
+			fmt.Fprintf(out, "Could not persist corrected config: %v\n", err)
 		}
 	}
 
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options] <search term>\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -lang de -max 10 Golang\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -clearcache\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -reset-config\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -version\n", os.Args[0])
+	fs := flag.NewFlagSet("wikr", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // suppress default noise; we'll provide our own usage
+	fs.Usage = func() {
+		fmt.Fprintf(out, "Usage: wikr [options] <search term>\n\n")
+		fmt.Fprintf(out, "Options:\n")
+		fs.PrintDefaults()
 	}
 
-	lang := flag.String("lang", config.Language, "language of the Wikipedia to use (en|de)")
-	maxResults := flag.Int("max", config.MaxResults, "maximum amount of result entries")
-	isClearCache := flag.Bool("clearcache", false, "clear the cache")
-	isVersion := flag.Bool("version", false, "show version")
-	isResetConfig := flag.Bool("reset-config", false, "regenerate default configuration and exit")
+	lang := fs.String("lang", config.Language, "language of the Wikipedia to use (en|de)")
+	maxResults := fs.Int("max", config.MaxResults, "maximum amount of result entries")
+	isClearCache := fs.Bool("clear-cache", false, "clear the cache")
+	isVersion := fs.Bool("version", false, "show version")
+	isResetConfig := fs.Bool("reset-config", false, "regenerate default configuration and exit")
 
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		fs.Usage()
+		return 2
+	}
 
 	if *isResetConfig {
 		defaultCfg := Config{Language: "en", MaxResults: 5}
 		if err := saveConfig(defaultCfg); err != nil {
-			fmt.Printf("Error writing default config: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(out, "Error writing default config: %v\n", err)
+			return 1
 		}
-		fmt.Println("Configuration reset to defaults (language=en, max_results=5)")
-		return
+		fmt.Fprintln(out, "Configuration reset to defaults (language=en, max_results=5)")
+		return 0
 	}
 
 	// Update config if flags are set
 	configChanged := false
-	flag.Visit(func(f *flag.Flag) {
+	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "lang":
-			if *lang != config.Language {
-				config.Language = *lang
-				configChanged = true
-			}
+			if *lang != config.Language { config.Language = *lang; configChanged = true }
 		case "max":
-			if *maxResults != config.MaxResults {
-				config.MaxResults = *maxResults
-				configChanged = true
-			}
+			if *maxResults != config.MaxResults { config.MaxResults = *maxResults; configChanged = true }
 		}
 	})
-
 	if configChanged {
 		if err := saveConfig(config); err != nil {
-			fmt.Printf("Warning: could not save config: %v\n", err)
+			fmt.Fprintf(out, "Warning: could not save config: %v\n", err)
 		}
 	}
 
 	if *isClearCache {
-		err := clearCache()
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		fmt.Println("Cache cleared")
-		return
+		if err := clearCache(); err != nil { fmt.Fprintln(out, err); return 1 }
+		fmt.Fprintln(out, "Cache cleared")
+		return 0
 	}
-
 	if *isVersion {
-		fmt.Println("Version:", version)
-		return
+		fmt.Fprintf(out, "Version: %s\n", version)
+		return 0
 	}
 
-	if len(flag.Args()) == 0 {
-		flag.Usage()
-		os.Exit(1)
+	if fs.NArg() == 0 {
+		fs.Usage()
+		return 2
 	}
 
-	searchTerm := strings.Join(flag.Args(), " ")
+	searchTerm := strings.Join(fs.Args(), " ")
 	encodedSearchTerm := url.QueryEscape(searchTerm)
 
-	// Search for possible results (with caching + graceful fallback)
 	searchResults, cachedSearch, err := searchWikipedia(*lang, encodedSearchTerm)
 	if err != nil {
-		// Attempt to fall back to any cached results (even if expired) by forcing direct cache load
 		if titles, ok := getCachedSearch(*lang, encodedSearchTerm); ok {
-			color.Yellow("Network error (%v). Using previously cached search results.", err)
+			fmt.Fprintf(out, "Network error (%v). Using previously cached search results.\n", err)
 			searchResults = titles
 			cachedSearch = true
 		} else {
-			fmt.Println("Error during search:", err)
-			os.Exit(1)
+			fmt.Fprintf(out, "Error during search: %v\n", err)
+			return 1
 		}
 	}
-
 	if len(searchResults) == 0 {
-		if cachedSearch {
-			fmt.Println("Cached search results were empty.")
-		} else {
-			fmt.Println("No results found.")
-		}
-		os.Exit(1)
+		if cachedSearch { fmt.Fprintln(out, "Cached search results were empty.") } else { fmt.Fprintln(out, "No results found.") }
+		return 1
 	}
 
 	var selectedTitle string
-	if len(searchResults) == 1 {
-		selectedTitle = searchResults[0]
-	} else {
-		selectedTitle = chooseResult(searchResults, maxResults)
+	if len(searchResults) == 1 { selectedTitle = searchResults[0] } else { selectedTitle = chooseResult(searchResults, maxResults, *lang) }
+
+	summary, urlStr, cached, err := getWikipediaSummary(*lang, selectedTitle)
+	if err != nil { fmt.Fprintf(out, "Error fetching summary: %v\n", err); return 1 }
+
+	// Colorized output only when writing to an interactive terminal (stdout).
+	if f, ok := out.(*os.File); ok {
+		if stat, err := f.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) != 0 {
+			// Terminal detected: use colors for labels but leave summary plain (user prefers uncolored summary for better native contrast).
+			headerColor := color.New(color.FgGreen, color.Bold)
+			cachedColor := color.New(color.FgYellow)
+			urlLabelColor := color.New(color.FgMagenta, color.Bold)
+			linkColor := color.New(color.FgBlue, color.Underline)
+			if *lang == "de" { headerColor.Fprintln(out, "\n\nZusammenfassung:") } else { headerColor.Fprintln(out, "\n\nSummary:") }
+			if cached { cachedColor.Fprintln(out, "(cached)") }
+			fmt.Fprintln(out, summary)
+			urlLabelColor.Fprintln(out, "\nURL:")
+			linkColor.Fprintln(out, urlStr)
+			return 0
+		}
 	}
 
-	// Get the summary for the selected title
-	summary, url, cached, err := getWikipediaSummary(*lang, selectedTitle)
-	if err != nil {
-		color.Red("Error fetching summary: %v", err)
-		os.Exit(1)
-	}
+	// Non-terminal (e.g., tests, piped output): keep plain text.
+	if *lang == "de" { fmt.Fprintln(out, "\n\nZusammenfassung:") } else { fmt.Fprintln(out, "\n\nSummary:") }
+	if cached { fmt.Fprintln(out, "(cached)") }
+	fmt.Fprintln(out, summary)
+	fmt.Fprintln(out, "\nURL:")
+	fmt.Fprintln(out, urlStr)
+	return 0
+}
 
-	color.Blue("\n\nSummary:")
-	if cached { color.Yellow("(cached)") }
-	fmt.Println(summary)
-	color.Green("\nURL:")
-	fmt.Println(url)
+func main() {
+    os.Exit(run(os.Stdout, os.Args[1:]))
 }
