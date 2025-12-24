@@ -64,7 +64,6 @@ Changing `-lang`, `-source` or `-max` updates the persisted config automatically
 ### Examples
 
 ```shell
-```
 wikr golang
 wikr -lang de golang
 wikr -source grokipedia golang
