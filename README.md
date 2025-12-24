@@ -5,12 +5,13 @@ wikr is a simple command line tool that provides quick summaries of Wikipedia ar
 ## Features
 
 - Search Wikipedia (English or German)
+- Search Grokipedia (English) as an alternative source
 - Interactive selection when multiple matches are returned
 - Summary extraction with link to full article
 - Two-layer caching:
   - Search results (titles list)
   - Article summaries (content + URL)
-- Config persistence (language + max results) with auto-correction on invalid values
+- Config persistence (language, source + max results) with auto-correction on invalid values
 - Graceful offline/network failure fallback (uses cached search if available)
 - `-reset-config` to restore defaults quickly
 
@@ -49,21 +50,24 @@ wikr [options] search term
 
 ### Options
 
-| Flag            | Description                                                    |
-| --------------- | -------------------------------------------------------------- |
-| `-lang`         | Language (`en` or `de`), default from config (initially `en`). |
-| `-max`          | Max number of listed results (default 5, persisted).           |
-| `-clear-cache`  | Clears summary cache only (search cache persists separately).  |
-| `-reset-config` | Regenerates config file with defaults (`en`, `5`) and exits.   |
-| `-version`      | Prints the version and exits.                                  |
+| Flag            | Description                                                     |
+| --------------- | --------------------------------------------------------------- |
+| `-lang`         | Language (`en` or `de`), default from config (initially `en`).  |
+| `-source`       | Content source (`wikipedia` or `grokipedia`), default from config (initially `wikipedia`). |
+| `-max`          | Max number of listed results (default 5, persisted).            |
+| `-clear-cache`  | Clears summary cache only (search cache persists separately).   |
+| `-reset-config` | Regenerates config file with defaults (`en`, `wikipedia`, `5`) and exits. |
+| `-version`      | Prints the version and exits.                                   |
 
-Changing `-lang` or `-max` updates the persisted config automatically. Invalid stored values are silently corrected and re-saved.
+Changing `-lang`, `-source` or `-max` updates the persisted config automatically. Invalid stored values are silently corrected and re-saved.
 
 ### Examples
 
 ```shell
+```
 wikr golang
 wikr -lang de golang
+wikr -source grokipedia golang
 wikr -max 3 golang
 wikr -clear-cache
 wikr -reset-config
