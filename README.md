@@ -82,9 +82,6 @@ Two caches (24h TTL each):
 
 If a network error occurs during search, a cached result (if present and still valid) is used and a warning is shown. Summaries are only fetched if not already cached.
 
-## Dependencies
-
-- [github.com/fatih/color](https://github.com/fatih/color) for colored console output
 
 ## License
 
