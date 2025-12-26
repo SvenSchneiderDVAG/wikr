@@ -15,11 +15,52 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/chromedp"
 	"github.com/fatih/color"
 )
+
+var (
+	chromeCheckOnce   sync.Once
+	chromeAvailable   bool
+	chromeCheckError  error
+	chromeWarningOnce sync.Once
+)
+
+// checkChromeAvailable checks if Chrome/Chromium is installed on the system.
+// The result is cached after the first check.
+func checkChromeAvailable() (bool, error) {
+	chromeCheckOnce.Do(func() {
+		// Try to create an allocator context - this will fail if Chrome is not found
+		opts := append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.Flag("headless", true),
+		)
+		allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+		defer cancel()
+
+		ctx, cancel := chromedp.NewContext(allocCtx)
+		defer cancel()
+
+		// Use a short timeout just to check if Chrome can start
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		// Try to run a minimal action - this will fail immediately if Chrome is not found
+		err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+			return nil
+		}))
+
+		if err != nil {
+			chromeCheckError = err
+			chromeAvailable = false
+		} else {
+			chromeAvailable = true
+		}
+	})
+	return chromeAvailable, chromeCheckError
+}
 
 const (
 	wikipediaAPITemplate        = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
@@ -681,6 +722,21 @@ func searchGrokipedia(query string) ([]string, bool, error) {
 		fmt.Printf("Launching chromedp search for: %s\n", trimmed)
 	}
 
+	// Check if Chrome is available before attempting chromedp
+	if available, err := checkChromeAvailable(); !available {
+		chromeWarningOnce.Do(func() {
+			if err != nil && (strings.Contains(err.Error(), "executable file not found") ||
+				strings.Contains(err.Error(), "not found") ||
+				strings.Contains(err.Error(), "no such file")) {
+				fmt.Fprintf(os.Stderr, "Warning: Chrome/Chromium not found. Grokipedia search requires Chrome for full functionality.\n")
+				fmt.Fprintf(os.Stderr, "         Install Chrome or Chromium to enable full search. Falling back to direct page access.\n")
+			} else if err != nil && debug {
+				fmt.Printf("Chrome check failed: %v\n", err)
+			}
+		})
+		return searchGrokipediaDirectFallback(trimmed, escapedQuery)
+	}
+
 	titles, err := searchGrokipediaChromedp(trimmed, escapedQuery)
 	if err != nil {
 		if debug {
@@ -895,7 +951,6 @@ func run(out io.Writer, args []string) int {
 		} else {
 			selectedTitle = chooseResult(searchResults, maxResults, *lang)
 		}
-		fmt.Printf("Selected title: %s\n", selectedTitle)
 
 		summary, urlStr, cached, err = getGrokipediaSummary(selectedTitle)
 		if err != nil {
