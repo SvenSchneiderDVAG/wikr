@@ -30,7 +30,7 @@ const (
 	grokipediaPageAPITemplate   = "https://grokipedia.com/page/%s"
 	grokipediaSearchAPITemplate = "https://grokipedia.com/search?q=%s"
 	cacheDuration               = 24 * time.Hour
-	version                     = "0.7.0"
+	version                     = "0.7.1"
 )
 
 // debug is a runtime variable (was const) so tests can toggle it to cover debug print branches.
