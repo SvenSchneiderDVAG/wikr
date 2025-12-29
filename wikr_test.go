@@ -1404,3 +1404,36 @@ func TestRunSourceGrokipedia(t *testing.T) {
 		t.Fatalf("expected Grokipedia URL in output, got %s", out)
 	}
 }
+
+// TestRunGrokipediaChromeNotFound tests that a clear error message is shown when Chrome is not installed.
+func TestRunGrokipediaChromeNotFound(t *testing.T) {
+	// Mock the chromedp function to simulate Chrome not being installed
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		return nil, ErrChromeNotFound
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	// Clear any cached search results that might be used as fallback
+	sCache := loadSearchCache()
+	delete(sCache, "grokipedia:"+url.QueryEscape("TestChromeNotFound"))
+	saveSearchCache(sCache)
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "grokipedia", "TestChromeNotFound"})
+
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Chrome/Chromium browser not found") {
+		t.Fatalf("expected Chrome not found error message, got: %s", out)
+	}
+	if !strings.Contains(out, "Please install Chrome/Chromium") {
+		t.Fatalf("expected installation hint in error message, got: %s", out)
+	}
+	if !strings.Contains(out, "-source wikipedia") {
+		t.Fatalf("expected wikipedia alternative suggestion, got: %s", out)
+	}
+}
