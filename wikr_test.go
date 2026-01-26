@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestMain now isolates tests in a temporary XDG cache/config root so we don't
@@ -338,27 +341,18 @@ func urlQueryEscapeHelper(s string) string {
 }
 
 func TestChooseResultDefaultAndIndex(t *testing.T) {
-	// Simulate stdin using a pipe
-	r, w, _ := os.Pipe()
-	oldStdin := os.Stdin
-	defer func() { os.Stdin = oldStdin }()
-	os.Stdin = r
-
 	results := []string{"Alpha", "Beta", "Gamma"}
 	max := 3
 
 	// First test: default selection (empty input) -> Alpha
-	go func() { w.WriteString("\n") }()
-	sel := chooseResult(results, &max, "en")
+	out := &bytes.Buffer{}
+	sel := chooseResult(results, &max, "en", out, strings.NewReader("\n"))
 	if sel != "Alpha" {
 		t.Fatalf("expected default Alpha, got %s", sel)
 	}
 
 	// Second test: pick index 2 (Beta)
-	r2, w2, _ := os.Pipe()
-	os.Stdin = r2
-	go func() { w2.WriteString("2\n") }()
-	sel2 := chooseResult(results, &max, "en")
+	sel2 := chooseResult(results, &max, "en", out, strings.NewReader("2\n"))
 	if sel2 != "Beta" {
 		t.Fatalf("expected Beta, got %s", sel2)
 	}
@@ -483,6 +477,24 @@ func TestSummaryTruncationAndCaching(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("expected 1 network call, got %d", calls)
+	}
+}
+
+func TestTruncateWithEllipsisUTF8(t *testing.T) {
+	long := strings.Repeat("界", summaryMaxLen+5)
+	truncated := truncateWithEllipsis(long, summaryMaxLen)
+	if !utf8.ValidString(truncated) {
+		t.Fatalf("expected valid UTF-8 after truncation")
+	}
+	if !strings.HasSuffix(truncated, "...") {
+		t.Fatalf("expected ellipsis suffix")
+	}
+	if utf8.RuneCountInString(truncated) != summaryMaxLen {
+		t.Fatalf("expected %d runes, got %d", summaryMaxLen, utf8.RuneCountInString(truncated))
+	}
+	short := strings.Repeat("界", 10)
+	if got := truncateWithEllipsis(short, summaryMaxLen); got != short {
+		t.Fatalf("expected short string unchanged")
 	}
 }
 
@@ -668,30 +680,22 @@ func TestSearchWikipediaHTTPStatusError(t *testing.T) {
 }
 
 func TestChooseResultInvalidSelection(t *testing.T) {
-	r, w, _ := os.Pipe()
-	old := os.Stdin
-	os.Stdin = r
-	defer func() { os.Stdin = old }()
-	// Provide invalid selection then newline default
-	go func() { w.WriteString("9\n\n") }()
 	results := []string{"Alpha", "Beta", "Gamma"}
 	max := 3
-	sel := chooseResult(results, &max, "en")
+	out := &bytes.Buffer{}
+	// Provide invalid selection then newline default
+	sel := chooseResult(results, &max, "en", out, strings.NewReader("9\n\n"))
 	if sel != "Alpha" {
 		t.Fatalf("expected Alpha after invalid then default, got %s", sel)
 	}
 }
 
 func TestChooseResultGermanBranch(t *testing.T) {
-	r, w, _ := os.Pipe()
-	old := os.Stdin
-	os.Stdin = r
-	defer func() { os.Stdin = old }()
-	// invalid, then 2 -> should select Beta
-	go func() { w.WriteString("x\n2\n") }()
 	results := []string{"Alpha", "Beta", "Gamma"}
 	max := 3
-	sel := chooseResult(results, &max, "de")
+	out := &bytes.Buffer{}
+	// invalid, then 2 -> should select Beta
+	sel := chooseResult(results, &max, "de", out, strings.NewReader("x\n2\n"))
 	if sel != "Beta" {
 		t.Fatalf("expected Beta after invalid then 2, got %s", sel)
 	}
@@ -1185,6 +1189,27 @@ func TestHTTPGetAllRetriesFail(t *testing.T) {
 	}
 	if time.Since(start) < 150*time.Millisecond {
 		t.Fatalf("expected at least initial backoff delay; too fast")
+	}
+}
+
+func TestHTTPGetTimeout(t *testing.T) {
+	origTimeout := httpTimeout
+	httpTimeout = 10 * time.Millisecond
+	defer func() { httpTimeout = origTimeout }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(200)
+		io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	_, _, _, err := httpGet(srv.URL)
+	if err == nil {
+		t.Fatalf("expected timeout error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
 	}
 }
 

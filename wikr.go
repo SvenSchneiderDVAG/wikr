@@ -68,6 +68,7 @@ const (
 	grokipediaPageAPITemplate   = "https://grokipedia.com/page/%s"
 	grokipediaSearchAPITemplate = "https://grokipedia.com/search?q=%s"
 	cacheDuration               = 24 * time.Hour
+	summaryMaxLen               = 1000
 	version                     = "0.7.0"
 )
 
@@ -78,6 +79,8 @@ var (
 	userAgent = "wikr/" + version + " (+https://github.com/SvenSchneiderDVAG/wikr)"
 	// httpGetFunc allows tests to inject a mock for network calls.
 	httpGetFunc = httpGet
+	httpTimeout = 10 * time.Second
+	httpClient  = &http.Client{}
 )
 
 type CacheEntry struct {
@@ -147,9 +150,10 @@ func saveCache(cache Cache) {
 		fmt.Printf("Error encoding cache: %v\n", err)
 		return
 	}
-	err = os.WriteFile(cachePath, data, 0644)
-	if err != nil && debug {
-		fmt.Printf("Error writing cache file %s: %v\n", cachePath, err)
+	if err := writeFileAtomic(cachePath, data, 0644); err != nil {
+		if debug {
+			fmt.Printf("Error writing cache file %s: %v\n", cachePath, err)
+		}
 	}
 }
 
@@ -207,7 +211,7 @@ func saveSearchCache(c map[string]SearchResultEntry) {
 		}
 		return
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := writeFileAtomic(path, data, 0644); err != nil {
 		if debug {
 			fmt.Printf("Error writing search cache: %v\n", err)
 		}
@@ -339,10 +343,76 @@ func saveConfig(config Config) error {
 	if err != nil {
 		return fmt.Errorf("error encoding config: %w", err)
 	}
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := writeFileAtomic(configPath, data, 0644); err != nil {
 		return fmt.Errorf("error writing config file %s: %w", configPath, err)
 	}
 	return nil
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		if removeErr := os.Remove(path); removeErr == nil {
+			renameErr := os.Rename(tmpName, path)
+			if renameErr == nil {
+				return nil
+			}
+			err = renameErr
+		}
+		cleanup()
+		return err
+	}
+	return nil
+}
+
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	stat, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
+func truncateWithEllipsis(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
 }
 
 // httpGet performs an HTTP GET with retries and returns body, status, contentType.
@@ -352,19 +422,23 @@ func httpGet(endpoint string) ([]byte, int, string, error) {
 	backoff := 150 * time.Millisecond
 	const maxAttempts = 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
+			cancel()
 			return nil, 0, "", fmt.Errorf("create request: %w", err)
 		}
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("Accept", "text/html,application/json;q=0.9,*/*;q=0.8")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
+			cancel()
 			lastErr = fmt.Errorf("perform request: %w", err)
 		} else {
 			ct := resp.Header.Get("Content-Type")
 			body, rerr := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			cancel()
 			if rerr != nil {
 				return nil, resp.StatusCode, ct, fmt.Errorf("read body: %w", rerr)
 			}
@@ -435,28 +509,37 @@ func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
 
 // chooseResult lets the user pick one of the returned titles when more than one
 // result is available.
-func chooseResult(results []string, maxResults *int, lang string) string {
+func chooseResult(results []string, maxResults *int, lang string, out io.Writer, in io.Reader) string {
 	limit := *maxResults
 	if limit <= 0 || limit > len(results) {
 		limit = len(results)
 	}
-	fmt.Println()
+	fmt.Fprintln(out)
+	useColor := isTerminal(out)
 	if lang == "de" {
-		color.Cyan("Mehrere Ergebnisse gefunden (zeige %d von %d):", limit, len(results))
+		if useColor {
+			color.New(color.FgCyan).Fprintf(out, "Mehrere Ergebnisse gefunden (zeige %d von %d):\n", limit, len(results))
+		} else {
+			fmt.Fprintf(out, "Mehrere Ergebnisse gefunden (zeige %d von %d):\n", limit, len(results))
+		}
 	} else {
-		color.Cyan("Multiple results found (showing %d of %d):", limit, len(results))
+		if useColor {
+			color.New(color.FgCyan).Fprintf(out, "Multiple results found (showing %d of %d):\n", limit, len(results))
+		} else {
+			fmt.Fprintf(out, "Multiple results found (showing %d of %d):\n", limit, len(results))
+		}
 	}
 	for i := 0; i < limit; i++ {
-		fmt.Printf("  [%d] %s\n", i+1, results[i])
+		fmt.Fprintf(out, "  [%d] %s\n", i+1, results[i])
 	}
-	fmt.Println()
+	fmt.Fprintln(out)
 
-	reader := bufio.NewReader(os.Stdin)
+	reader := bufio.NewReader(in)
 	for {
 		if lang == "de" {
-			fmt.Print("Bitte eine Nummer auswählen (Standard 1): ")
+			fmt.Fprint(out, "Bitte eine Nummer auswählen (Standard 1): ")
 		} else {
-			fmt.Print("Select a result number (default 1): ")
+			fmt.Fprint(out, "Select a result number (default 1): ")
 		}
 		line, _ := reader.ReadString('\n')
 		line = strings.TrimSpace(line)
@@ -470,9 +553,17 @@ func chooseResult(results []string, maxResults *int, lang string) string {
 			return results[idx-1]
 		}
 		if lang == "de" {
-			color.Yellow("Ungültige Auswahl. Bitte eine Zahl zwischen 1 und %d eingeben.", limit)
+			if useColor {
+				color.New(color.FgYellow).Fprintf(out, "Ungültige Auswahl. Bitte eine Zahl zwischen 1 und %d eingeben.\n", limit)
+			} else {
+				fmt.Fprintf(out, "Ungültige Auswahl. Bitte eine Zahl zwischen 1 und %d eingeben.\n", limit)
+			}
 		} else {
-			color.Yellow("Invalid selection. Please enter a number between 1 and %d.", limit)
+			if useColor {
+				color.New(color.FgYellow).Fprintf(out, "Invalid selection. Please enter a number between 1 and %d.\n", limit)
+			} else {
+				fmt.Fprintf(out, "Invalid selection. Please enter a number between 1 and %d.\n", limit)
+			}
 		}
 	}
 }
@@ -516,9 +607,7 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 	if !ok {
 		return "", "", false, errors.New("missing page URL")
 	}
-	if len(extractStr) > 1000 {
-		extractStr = extractStr[:997] + "..."
-	}
+	extractStr = truncateWithEllipsis(extractStr, summaryMaxLen)
 	setCachedEntry(lang, title, extractStr, pageURL)
 	return extractStr, pageURL, false, nil
 }
@@ -589,10 +678,7 @@ func getGrokipediaSummary(title string) (string, string, bool, error) {
 		return "", "", false, fmt.Errorf("article '%s' does not exist on Grokipedia yet", title)
 	}
 
-	// Truncate if too long
-	if len(summary) > 1000 {
-		summary = summary[:997] + "..."
-	}
+	summary = truncateWithEllipsis(summary, summaryMaxLen)
 
 	setCachedEntry("grokipedia", slug, summary, endpoint)
 	return summary, endpoint, false, nil
@@ -949,7 +1035,7 @@ func run(out io.Writer, args []string) int {
 		if len(searchResults) == 1 {
 			selectedTitle = searchResults[0]
 		} else {
-			selectedTitle = chooseResult(searchResults, maxResults, *lang)
+			selectedTitle = chooseResult(searchResults, maxResults, *lang, os.Stderr, os.Stdin)
 		}
 
 		summary, urlStr, cached, err = getGrokipediaSummary(selectedTitle)
@@ -986,7 +1072,7 @@ func run(out io.Writer, args []string) int {
 		if len(searchResults) == 1 {
 			selectedTitle = searchResults[0]
 		} else {
-			selectedTitle = chooseResult(searchResults, maxResults, *lang)
+			selectedTitle = chooseResult(searchResults, maxResults, *lang, os.Stderr, os.Stdin)
 		}
 
 		summary, urlStr, cached, err = getWikipediaSummary(*lang, selectedTitle)
@@ -997,26 +1083,24 @@ func run(out io.Writer, args []string) int {
 	}
 
 	// Colorized output only when writing to an interactive terminal (stdout).
-	if f, ok := out.(*os.File); ok {
-		if stat, err := f.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) != 0 {
-			// Terminal detected: use colors for labels but leave summary plain (user prefers uncolored summary for better native contrast).
-			headerColor := color.New(color.FgGreen, color.Bold)
-			cachedColor := color.New(color.FgYellow)
-			urlLabelColor := color.New(color.FgMagenta, color.Bold)
-			linkColor := color.New(color.FgBlue, color.Underline)
-			if *lang == "de" {
-				headerColor.Fprintln(out, "\n\nZusammenfassung:")
-			} else {
-				headerColor.Fprintln(out, "\n\nSummary:")
-			}
-			if cached {
-				cachedColor.Fprintln(out, "(cached)")
-			}
-			fmt.Fprintln(out, summary)
-			urlLabelColor.Fprintln(out, "\nURL:")
-			linkColor.Fprintln(out, urlStr)
-			return 0
+	if isTerminal(out) {
+		// Terminal detected: use colors for labels but leave summary plain (user prefers uncolored summary for better native contrast).
+		headerColor := color.New(color.FgGreen, color.Bold)
+		cachedColor := color.New(color.FgYellow)
+		urlLabelColor := color.New(color.FgMagenta, color.Bold)
+		linkColor := color.New(color.FgBlue, color.Underline)
+		if *lang == "de" {
+			headerColor.Fprintln(out, "\n\nZusammenfassung:")
+		} else {
+			headerColor.Fprintln(out, "\n\nSummary:")
 		}
+		if cached {
+			cachedColor.Fprintln(out, "(cached)")
+		}
+		fmt.Fprintln(out, summary)
+		urlLabelColor.Fprintln(out, "\nURL:")
+		linkColor.Fprintln(out, urlStr)
+		return 0
 	}
 
 	// Non-terminal (e.g., tests, piped output): keep plain text.
