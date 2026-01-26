@@ -15,28 +15,34 @@ wikr is a simple command line tool that provides quick summaries of Wikipedia ar
 - Graceful offline/network failure fallback (uses cached search if available)
 - `-reset-config` to restore defaults quickly
 
+## Dependencies
+
+- **Go**: Required for building and installing wikr.
+- **Google Chrome or Chromium**: Required for Grokipedia search functionality. The `grokipedia` source uses browser automation (via chromedp) to render JavaScript-based search results. If Chrome/Chromium is not installed, Grokipedia searches will fail with an error message.
+
 ## Installation
 
 1. Ensure that Go is installed on your system.
-2. Clone this Repository:
+2. (Optional) Install Google Chrome or Chromium if you want to use the `-source grokipedia` feature.
+3. Clone this Repository:
 
    ```shell
    git clone https://github.com/SvenSchneiderDVAG/wikr.git
    ```
 
-3. Navigate to the project directory:
+4. Navigate to the project directory:
 
    ```shell
    cd wikr
    ```
 
-4. Build the program:
+5. Build the program:
 
    ```shell
    go build
    ```
 
-5. Install the program:
+6. Install the program:
 
    ```shell
    go install

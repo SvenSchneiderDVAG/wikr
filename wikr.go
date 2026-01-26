@@ -63,6 +63,9 @@ func checkChromeAvailable() (bool, error) {
 	return chromeAvailable, chromeCheckError
 }
 
+// ErrChromeNotFound is returned when Chrome/Chromium is not installed on the system.
+var ErrChromeNotFound = errors.New("Chrome/Chromium browser not found. Grokipedia search requires Chrome or Chromium to be installed")
+
 const (
 	wikipediaAPITemplate        = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
 	wikipediaSearchAPITemplate  = "https://%s.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s&format=json"
@@ -863,6 +866,20 @@ func searchGrokipediaChromedpImpl(query string, escapedQuery string) ([]string, 
 	ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	// Test if Chrome is available by running a minimal action
+	// This will fail fast if Chrome is not installed
+	if err := chromedp.Run(ctx); err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "executable file not found") ||
+			strings.Contains(errStr, "exec:") ||
+			strings.Contains(errStr, "cannot find") ||
+			strings.Contains(errStr, "not found") ||
+			strings.Contains(errStr, "no such file") {
+			return nil, ErrChromeNotFound
+		}
+		return nil, err
+	}
+
 	titles := make([]string, 0)
 
 	// Navigate and wait for page to load, then extract search results
@@ -981,6 +998,10 @@ func searchGrokipedia(query string) ([]string, bool, error) {
 	if err != nil {
 		if debug {
 			fmt.Printf("chromedp search error: %v\n", err)
+		}
+		// If Chrome is not found, return the error directly without fallback
+		if errors.Is(err, ErrChromeNotFound) {
+			return nil, false, err
 		}
 		// Fallback: try direct page access as before
 		return searchGrokipediaDirectFallback(trimmed, escapedQuery)
@@ -1170,6 +1191,12 @@ func run(out io.Writer, args []string) int {
 			var cachedSearch bool
 			searchResults, cachedSearch, err = searchGrokipedia(searchTerm)
 			if err != nil {
+				if errors.Is(err, ErrChromeNotFound) {
+					fmt.Fprintln(out, "Error: Chrome/Chromium browser not found.")
+					fmt.Fprintln(out, "Grokipedia search requires Chrome or Chromium to be installed on your system.")
+					fmt.Fprintln(out, "Please install Chrome/Chromium and try again, or use '-source wikipedia' instead.")
+					return 1
+				}
 				if titles, ok := getCachedSearch("grokipedia", grokEscaped); ok {
 					fmt.Fprintf(out, "Network error (%v). Using previously cached search results.\n", err)
 					searchResults = titles
