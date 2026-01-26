@@ -11,7 +11,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -101,13 +103,7 @@ func TestSearchWikipedia(t *testing.T) {
 	}
 
 	_ = cached
-	foundBerlin := false
-	for _, r := range results {
-		if r == "Berlin" {
-			foundBerlin = true
-			break
-		}
-	}
+	foundBerlin := slices.Contains(results, "Berlin")
 
 	if !foundBerlin {
 		t.Error("'Berlin' should be included in the search results")
@@ -346,13 +342,19 @@ func TestChooseResultDefaultAndIndex(t *testing.T) {
 
 	// First test: default selection (empty input) -> Alpha
 	out := &bytes.Buffer{}
-	sel := chooseResult(results, &max, "en", out, strings.NewReader("\n"))
+	sel, quit, refine := chooseResult(results, &max, "en", "wikipedia", out, strings.NewReader("\n"))
+	if quit || refine != "" {
+		t.Fatalf("unexpected quit/refine on default selection")
+	}
 	if sel != "Alpha" {
 		t.Fatalf("expected default Alpha, got %s", sel)
 	}
 
 	// Second test: pick index 2 (Beta)
-	sel2 := chooseResult(results, &max, "en", out, strings.NewReader("2\n"))
+	sel2, quit2, refine2 := chooseResult(results, &max, "en", "wikipedia", out, strings.NewReader("2\n"))
+	if quit2 || refine2 != "" {
+		t.Fatalf("unexpected quit/refine on index selection")
+	}
 	if sel2 != "Beta" {
 		t.Fatalf("expected Beta, got %s", sel2)
 	}
@@ -534,6 +536,28 @@ func TestRunNoArgsShowsUsage(t *testing.T) {
 	}
 }
 
+func TestRunInvalidFlag(t *testing.T) {
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-nope"})
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d", code)
+	}
+	if !strings.Contains(buf.String(), "flag provided but not defined") {
+		t.Fatalf("expected flag error, got %s", buf.String())
+	}
+}
+
+func TestRunHelpFlag(t *testing.T) {
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-h"})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(buf.String(), "Usage:") {
+		t.Fatalf("expected usage text, got %s", buf.String())
+	}
+}
+
 func TestRunResetConfig(t *testing.T) {
 	buf := &bytes.Buffer{}
 	code := run(buf, []string{"-reset-config"})
@@ -558,6 +582,29 @@ func TestRunClearCache(t *testing.T) {
 	}
 }
 
+func TestRunClearCacheError(t *testing.T) {
+	cachePath, err := getCachePath()
+	if err != nil {
+		t.Fatalf("cache path err: %v", err)
+	}
+	os.Remove(cachePath)
+	if err := os.Mkdir(cachePath, 0755); err != nil {
+		t.Fatalf("mkdir cache path err: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "keep"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write keep file err: %v", err)
+	}
+	defer os.RemoveAll(cachePath)
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-clear-cache"})
+	if code == 0 {
+		t.Fatalf("expected non-zero exit on clear cache error")
+	}
+	if !strings.Contains(buf.String(), "error deleting cache file") {
+		t.Fatalf("expected delete error, got %s", buf.String())
+	}
+}
+
 func TestRunSearchAndSummaryEnglish(t *testing.T) {
 	// Mock network: search returns two results, summary returns first
 	orig := httpGetFunc
@@ -579,7 +626,7 @@ func TestRunSearchAndSummaryEnglish(t *testing.T) {
 	go func() { w.WriteString("\n") }()
 
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{"TestTerm"})
+	code := run(buf, []string{"-source", "wikipedia", "TestTerm"})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d; output=%s", code, buf.String())
 	}
@@ -595,6 +642,318 @@ func TestRunSearchAndSummaryEnglish(t *testing.T) {
 	}
 }
 
+func TestRunSearchRefineFlow(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		if strings.Contains(endpoint, "action=query") {
+			switch {
+			case strings.Contains(endpoint, "FirstTerm"):
+				return []byte(`{"query":{"search":[{"title":"Alpha"},{"title":"Beta"}]}}`), 200, "application/json", nil
+			case strings.Contains(endpoint, "NewTerm"):
+				return []byte(`{"query":{"search":[{"title":"RefinedTitle"}]}}`), 200, "application/json", nil
+			}
+		}
+		if strings.Contains(endpoint, "RefinedTitle") {
+			return []byte(`{"extract":"Refined summary","content_urls":{"desktop":{"page":"https://example.org/RefinedTitle"}}}`), 200, "application/json", nil
+		}
+		return []byte(`{}`), 500, "application/json", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	// Provide refine input: r, then new term
+	r, w, _ := os.Pipe()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	go func() {
+		w.WriteString("r\nNewTerm\n")
+		w.Close()
+	}()
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "wikipedia", "FirstTerm"})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; output=%s", code, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Refined summary") {
+		t.Fatalf("expected refined summary, got %s", out)
+	}
+	if !strings.Contains(out, "https://example.org/RefinedTitle") {
+		t.Fatalf("expected refined URL, got %s", out)
+	}
+}
+
+func TestRunConfigLoadErrorWarns(t *testing.T) {
+	cfgPath, err := getConfigPath()
+	if err != nil {
+		t.Fatalf("config path err: %v", err)
+	}
+	backup, _ := os.ReadFile(cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("{"), 0644); err != nil {
+		t.Fatalf("write invalid config err: %v", err)
+	}
+	defer func() {
+		if len(backup) > 0 {
+			_ = os.WriteFile(cfgPath, backup, 0644)
+		} else {
+			_ = os.Remove(cfgPath)
+		}
+	}()
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-version"})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(buf.String(), "Warning: could not load config") {
+		t.Fatalf("expected warning message, got %s", buf.String())
+	}
+}
+
+func TestRunInvalidSource(t *testing.T) {
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "invalid", "Term"})
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d", code)
+	}
+	if !strings.Contains(buf.String(), "Invalid source") {
+		t.Fatalf("expected invalid source message, got %s", buf.String())
+	}
+}
+
+func TestRunQuitSelection(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		if strings.Contains(endpoint, "action=query") {
+			return []byte(`{"query":{"search":[{"title":"Alpha"},{"title":"Beta"}]}}`), 200, "application/json", nil
+		}
+		t.Fatalf("summary should not be requested when user quits selection")
+		return nil, 0, "", io.EOF
+	}
+	defer func() { httpGetFunc = orig }()
+
+	r, w, _ := os.Pipe()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	go func() {
+		w.WriteString("q\n")
+		w.Close()
+	}()
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "wikipedia", "QuitTerm"})
+	if code != 0 {
+		t.Fatalf("expected exit 0 on quit, got %d; output=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "Selection canceled.") {
+		t.Fatalf("expected cancel message, got %s", buf.String())
+	}
+}
+
+func TestRunGrokipediaRefineFlow(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		switch query {
+		case "FirstTerm":
+			return []string{"Alpha", "Beta"}, nil
+		case "NewTerm":
+			return []string{"Refined"}, nil
+		default:
+			return []string{}, nil
+		}
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head><meta name="description" content="Refined Grok summary"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	escapedFirst := url.QueryEscape("FirstTerm")
+	data := loadSearchCache()
+	delete(data, "grokipedia:"+escapedFirst)
+	saveSearchCache(data)
+
+	r, w, _ := os.Pipe()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	go func() {
+		w.WriteString("r\nNewTerm\n")
+		w.Close()
+	}()
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "grokipedia", "FirstTerm"})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; output=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "Refined Grok summary") {
+		t.Fatalf("expected refined Grokipedia summary, got %s", buf.String())
+	}
+}
+
+func TestRunGrokipediaNoResults(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		return []string{}, nil
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte("not found"), 404, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "grokipedia", "NoHit"})
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for no results")
+	}
+	if !strings.Contains(buf.String(), "No results found.") {
+		t.Fatalf("expected no results message, got %s", buf.String())
+	}
+}
+
+func TestRunGrokipediaQuitSelection(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		return []string{"Alpha", "Beta"}, nil
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head><meta name="description" content="ok"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	r, w, _ := os.Pipe()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	go func() {
+		w.WriteString("q\n")
+		w.Close()
+	}()
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "grokipedia", "QuitTerm"})
+	if code != 0 {
+		t.Fatalf("expected exit 0 on quit, got %d; output=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "Selection canceled.") {
+		t.Fatalf("expected cancel message, got %s", buf.String())
+	}
+}
+
+func TestRunGrokipediaMissingThenAnother(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		return []string{"Alpha", "Beta"}, nil
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	counts := map[string]int{}
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		u, _ := url.Parse(endpoint)
+		slug := strings.TrimPrefix(u.Path, "/page/")
+		slug, _ = url.PathUnescape(slug)
+		counts[slug]++
+		switch slug {
+		case "Alpha":
+			if counts[slug] == 1 {
+				return []byte(`<html><head><meta name="description" content="Alpha summary"></head></html>`), 200, "text/html", nil
+			}
+			return []byte("not found"), 404, "text/html", nil
+		case "Beta":
+			return []byte(`<html><head><meta name="description" content="Beta summary"></head></html>`), 200, "text/html", nil
+		default:
+			return []byte("not found"), 404, "text/html", nil
+		}
+	}
+	defer func() { httpGetFunc = orig }()
+
+	r, w, _ := os.Pipe()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	go func() {
+		w.WriteString("1\na\n")
+		w.Close()
+	}()
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "grokipedia", "MissingTerm"})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; output=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "Beta summary") {
+		t.Fatalf("expected fallback to another result, got %s", buf.String())
+	}
+}
+
+func TestRunGrokipediaFilteredEmpty(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		return []string{"Alpha", "Beta"}, nil
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte("not found"), 404, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "grokipedia", "EmptyFiltered"})
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for filtered empty results")
+	}
+	if !strings.Contains(buf.String(), "No results found.") {
+		t.Fatalf("expected no results message, got %s", buf.String())
+	}
+}
+
+func TestRunGrokipediaFilterErrorFallback(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		return []string{"Alpha"}, nil
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	calls := 0
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		calls++
+		if calls == 1 {
+			return nil, 0, "", io.EOF
+		}
+		return []byte(`<html><head><meta name="description" content="Alpha summary"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	buf := &bytes.Buffer{}
+	code := run(buf, []string{"-source", "grokipedia", "FilterErr"})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; output=%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "Alpha summary") {
+		t.Fatalf("expected summary after filter error fallback, got %s", buf.String())
+	}
+}
+
 func TestRunSearchAndSummaryGerman(t *testing.T) {
 	orig := httpGetFunc
 	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
@@ -605,7 +964,7 @@ func TestRunSearchAndSummaryGerman(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{"-lang", "de", "Alpha"})
+	code := run(buf, []string{"-source", "wikipedia", "-lang", "de", "Alpha"})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
@@ -623,7 +982,7 @@ func TestRunNetworkErrorFallbackFailure(t *testing.T) {
 	httpGetFunc = func(endpoint string) ([]byte, int, string, error) { return nil, 0, "", io.EOF }
 	defer func() { httpGetFunc = orig }()
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{"UncachedTerm"})
+	code := run(buf, []string{"-source", "wikipedia", "UncachedTerm"})
 	if code == 0 {
 		t.Fatalf("expected non-zero exit on network error without cache")
 	}
@@ -684,7 +1043,10 @@ func TestChooseResultInvalidSelection(t *testing.T) {
 	max := 3
 	out := &bytes.Buffer{}
 	// Provide invalid selection then newline default
-	sel := chooseResult(results, &max, "en", out, strings.NewReader("9\n\n"))
+	sel, quit, refine := chooseResult(results, &max, "en", "wikipedia", out, strings.NewReader("9\n\n"))
+	if quit || refine != "" {
+		t.Fatalf("unexpected quit/refine on invalid selection flow")
+	}
 	if sel != "Alpha" {
 		t.Fatalf("expected Alpha after invalid then default, got %s", sel)
 	}
@@ -695,9 +1057,45 @@ func TestChooseResultGermanBranch(t *testing.T) {
 	max := 3
 	out := &bytes.Buffer{}
 	// invalid, then 2 -> should select Beta
-	sel := chooseResult(results, &max, "de", out, strings.NewReader("x\n2\n"))
+	sel, quit, refine := chooseResult(results, &max, "de", "grokipedia", out, strings.NewReader("x\n2\n"))
+	if quit || refine != "" {
+		t.Fatalf("unexpected quit/refine on german selection flow")
+	}
 	if sel != "Beta" {
 		t.Fatalf("expected Beta after invalid then 2, got %s", sel)
+	}
+}
+
+func TestChooseResultQuitAndRefine(t *testing.T) {
+	results := []string{"Alpha", "Beta", "Gamma"}
+	max := 3
+	out := &bytes.Buffer{}
+
+	_, quit, refine := chooseResult(results, &max, "en", "wikipedia", out, strings.NewReader("q\n"))
+	if !quit || refine != "" {
+		t.Fatalf("expected quit=true with no refine, got quit=%v refine=%q", quit, refine)
+	}
+
+	_, quit2, refine2 := chooseResult(results, &max, "en", "wikipedia", out, strings.NewReader("r\nNew Term\n"))
+	if quit2 || refine2 != "New Term" {
+		t.Fatalf("expected refine 'New Term', got quit=%v refine=%q", quit2, refine2)
+	}
+}
+
+func TestChooseResultRefineEmptyThenSelect(t *testing.T) {
+	results := []string{"Alpha", "Beta", "Gamma"}
+	max := 3
+	out := &bytes.Buffer{}
+	// refine -> empty -> then choose 2
+	sel, quit, refine := chooseResult(results, &max, "en", "wikipedia", out, strings.NewReader("r\n\n2\n"))
+	if quit || refine != "" {
+		t.Fatalf("unexpected quit/refine on empty refine flow")
+	}
+	if sel != "Beta" {
+		t.Fatalf("expected Beta after empty refine then selection, got %s", sel)
+	}
+	if !strings.Contains(out.String(), "source: wikipedia") {
+		t.Fatalf("expected source label in output, got %s", out.String())
 	}
 }
 
@@ -840,7 +1238,7 @@ func TestRunMaxLimitOneList(t *testing.T) {
 	defer func() { os.Stdin = old }()
 	go func() { w.WriteString("\n") }()
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{"-lang", "en", "-max", "1", "LimitTerm"})
+	code := run(buf, []string{"-source", "wikipedia", "-lang", "en", "-max", "1", "LimitTerm"})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d -- out=%s", code, buf.String())
 	}
@@ -869,7 +1267,7 @@ func TestRunCachedSearchAndSummary(t *testing.T) {
 		return []byte(`{"extract":"Cached summary body","content_urls":{"desktop":{"page":"https://example.org/CacheTitle"}}}`), 200, "application/json", nil
 	}
 	buf1 := &bytes.Buffer{}
-	if code := run(buf1, []string{term}); code != 0 {
+	if code := run(buf1, []string{"-source", "wikipedia", term}); code != 0 {
 		t.Fatalf("first run unexpected exit %d: %s", code, buf1.String())
 	}
 	if searchCalls != 1 || summaryCalls != 1 {
@@ -881,7 +1279,7 @@ func TestRunCachedSearchAndSummary(t *testing.T) {
 		return nil, 0, "", io.EOF
 	}
 	buf2 := &bytes.Buffer{}
-	if code := run(buf2, []string{term}); code != 0 {
+	if code := run(buf2, []string{"-source", "wikipedia", term}); code != 0 {
 		t.Fatalf("second run unexpected exit %d: %s", code, buf2.String())
 	}
 	out2 := buf2.String()
@@ -946,7 +1344,7 @@ func TestRunEmptyResultsNoCache(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{"EmptyNoCache"})
+	code := run(buf, []string{"-source", "wikipedia", "EmptyNoCache"})
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code for no results")
 	}
@@ -968,7 +1366,7 @@ func TestRunEmptyResultsCached(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{term})
+	code := run(buf, []string{"-source", "wikipedia", term})
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code for empty cached results")
 	}
@@ -988,7 +1386,7 @@ func TestRunSummaryError(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{"ErrSum"})
+	code := run(buf, []string{"-source", "wikipedia", "ErrSum"})
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code on summary error")
 	}
@@ -1012,7 +1410,7 @@ func TestRunSummaryCachedIndicator(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{term})
+	code := run(buf, []string{"-source", "wikipedia", term})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
@@ -1050,6 +1448,37 @@ func withEnv(t *testing.T, key, value string) func() {
 		} else {
 			os.Unsetenv(key)
 		}
+	}
+}
+
+func setChromeCheckResult(available bool, err error) {
+	chromeCheckOnce = sync.Once{}
+	chromeWarningOnce = sync.Once{}
+	chromeAvailable = available
+	chromeCheckError = err
+	chromeCheckOnce.Do(func() {})
+}
+
+func TestCheckChromeAvailableSmoke(t *testing.T) {
+	oldOnce := chromeCheckOnce
+	oldAvail := chromeAvailable
+	oldErr := chromeCheckError
+	sentinel := errors.New("sentinel")
+	chromeCheckOnce = sync.Once{}
+	chromeAvailable = false
+	chromeCheckError = sentinel
+	defer func() {
+		chromeCheckOnce = oldOnce
+		chromeAvailable = oldAvail
+		chromeCheckError = oldErr
+	}()
+	_, err := checkChromeAvailable()
+	if err == nil {
+		if !chromeAvailable {
+			t.Fatalf("expected chromeAvailable=true on success")
+		}
+	} else if chromeCheckError == sentinel {
+		t.Fatalf("expected chromeCheckError to change, got err=%v", err)
 	}
 }
 
@@ -1226,6 +1655,9 @@ func TestSaveCacheWriteError(t *testing.T) {
 	if err := os.Mkdir(path, 0755); err != nil {
 		t.Fatalf("mkdir replacement err: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(path, "keep"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write keep err: %v", err)
+	}
 	saveCache(Cache{"en:Err": {Summary: "s", URL: "u", Timestamp: time.Now()}})
 	// Cleanup
 	os.RemoveAll(path)
@@ -1243,8 +1675,59 @@ func TestSaveSearchCacheWriteError(t *testing.T) {
 	if err := os.Mkdir(scPath, 0755); err != nil {
 		t.Fatalf("mkdir search cache replacement err: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(scPath, "keep"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write keep err: %v", err)
+	}
 	saveSearchCache(map[string]SearchResultEntry{"en:q": {Titles: []string{"t"}, Timestamp: time.Now()}})
 	os.RemoveAll(scPath)
+}
+
+func TestWriteFileAtomicCreateTempError(t *testing.T) {
+	dir, cleanup := withTempDir(t)
+	defer cleanup()
+	noWrite := filepath.Join(dir, "nowrite")
+	if err := os.Mkdir(noWrite, 0500); err != nil {
+		t.Fatalf("mkdir nowrite err: %v", err)
+	}
+	defer os.Chmod(noWrite, 0700)
+	path := filepath.Join(noWrite, "file.json")
+	if err := writeFileAtomic(path, []byte("x"), 0644); err == nil {
+		t.Fatalf("expected error when directory is not writable")
+	}
+}
+
+func TestWriteFileAtomicRenameFallback(t *testing.T) {
+	dir, cleanup := withTempDir(t)
+	defer cleanup()
+	path := filepath.Join(dir, "target")
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatalf("mkdir target err: %v", err)
+	}
+	if err := writeFileAtomic(path, []byte("hello"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic err: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back err: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("unexpected data %q", string(data))
+	}
+}
+
+func TestWriteFileAtomicRenameErrorNonEmptyDir(t *testing.T) {
+	dir, cleanup := withTempDir(t)
+	defer cleanup()
+	path := filepath.Join(dir, "target")
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatalf("mkdir target err: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "keep"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write keep err: %v", err)
+	}
+	if err := writeFileAtomic(path, []byte("hello"), 0644); err == nil {
+		t.Fatalf("expected rename error for non-empty dir")
+	}
 }
 
 // clearCache success with debug prints (file exists).
@@ -1295,7 +1778,7 @@ func TestRunMultiResultSelection(t *testing.T) {
 	// Provide valid selection "2"; ensure config from previous tests (that may have set -max 1) is overridden by explicit -max 5 here.
 	go func() { w.WriteString("2\n") }()
 	buf := &bytes.Buffer{}
-	code := run(buf, []string{"-max", "5", "QueryTerm"})
+	code := run(buf, []string{"-source", "wikipedia", "-max", "5", "QueryTerm"})
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d; out=%s", code, buf.String())
 	}
@@ -1346,6 +1829,83 @@ func TestGetGrokipediaSummaryParsesFirstBlock(t *testing.T) {
 	}
 }
 
+func TestGetGrokipediaSummaryEmptyTitle(t *testing.T) {
+	_, _, _, err := getGrokipediaSummary("   ")
+	if err == nil || !strings.Contains(err.Error(), "empty title") {
+		t.Fatalf("expected empty title error, got %v", err)
+	}
+}
+
+func TestGetGrokipediaSummaryNotFound(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte("not found"), 404, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	_, _, _, err := getGrokipediaSummary("MissingArticle")
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected not found error, got %v", err)
+	}
+}
+
+func TestGetGrokipediaSummaryUnexpectedStatus(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte("error"), 500, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	_, _, _, err := getGrokipediaSummary("StatusArticle")
+	if err == nil || !strings.Contains(err.Error(), "unexpected status") {
+		t.Fatalf("expected status error, got %v", err)
+	}
+}
+
+func TestGetGrokipediaSummaryMissingDescription(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head></head><body>No meta</body></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	_, _, _, err := getGrokipediaSummary("NoDesc")
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected missing description error, got %v", err)
+	}
+}
+
+func TestGetGrokipediaSummaryTruncation(t *testing.T) {
+	long := strings.Repeat("A", summaryMaxLen+50)
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head><meta name="description" content="` + long + `"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	summary, _, _, err := getGrokipediaSummary("LongDesc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if utf8.RuneCountInString(summary) != summaryMaxLen {
+		t.Fatalf("expected truncated summary length %d, got %d", summaryMaxLen, utf8.RuneCountInString(summary))
+	}
+}
+
+func TestGetGrokipediaSummaryCached(t *testing.T) {
+	setCachedEntry("grokipedia", "Cached_Title", "Cached summary", "https://example.org/Cached_Title")
+	summary, urlStr, cached, err := getGrokipediaSummary("Cached Title")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cached {
+		t.Fatalf("expected cached=true")
+	}
+	if summary != "Cached summary" || urlStr != "https://example.org/Cached_Title" {
+		t.Fatalf("unexpected cached data: %s %s", summary, urlStr)
+	}
+}
+
 func TestSearchGrokipediaIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping Grokipedia integration test in short mode")
@@ -1389,6 +1949,330 @@ func TestSearchGrokipediaIntegration(t *testing.T) {
 	}
 	if len(titles2) != len(titles) {
 		t.Fatalf("cached titles count mismatch")
+	}
+}
+
+func TestFilterGrokipediaResults(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		u, _ := url.Parse(endpoint)
+		slug := strings.TrimPrefix(u.Path, "/page/")
+		slug, _ = url.PathUnescape(slug)
+		switch slug {
+		case "Valid_One", "Valid_Two":
+			return []byte(`<html><head><meta name="description" content="ok"></head></html>`), 200, "text/html", nil
+		default:
+			return []byte("not found"), 404, "text/html", nil
+		}
+	}
+	defer func() { httpGetFunc = orig }()
+
+	results := []string{"Invalid", "Valid One", "Valid Two"}
+	filtered, err := filterGrokipediaResults(results, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(filtered) != 2 || filtered[0] != "Valid One" || filtered[1] != "Valid Two" {
+		t.Fatalf("unexpected filtered results: %v", filtered)
+	}
+}
+
+func TestFilterGrokipediaResultsError(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return nil, 0, "", io.EOF
+	}
+	defer func() { httpGetFunc = orig }()
+
+	_, err := filterGrokipediaResults([]string{"Any"}, 1)
+	if err == nil {
+		t.Fatalf("expected error from probe")
+	}
+}
+
+func TestProbeGrokipediaTitleBranches(t *testing.T) {
+	orig := httpGetFunc
+	defer func() { httpGetFunc = orig }()
+
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte("not found"), 404, "text/html", nil
+	}
+	ok, err := probeGrokipediaTitle("Missing")
+	if err != nil || ok {
+		t.Fatalf("expected not found without error, got ok=%v err=%v", ok, err)
+	}
+
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head></head></html>`), 200, "text/html", nil
+	}
+	ok, err = probeGrokipediaTitle("EmptyDesc")
+	if err != nil || ok {
+		t.Fatalf("expected empty summary to be invalid, got ok=%v err=%v", ok, err)
+	}
+
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte("error"), 500, "text/html", nil
+	}
+	_, err = probeGrokipediaTitle("ServerErr")
+	if err == nil {
+		t.Fatalf("expected error on unexpected status")
+	}
+}
+
+func TestProbeGrokipediaTitleEmpty(t *testing.T) {
+	ok, err := probeGrokipediaTitle("   ")
+	if err != nil || ok {
+		t.Fatalf("expected empty title to be invalid without error, got ok=%v err=%v", ok, err)
+	}
+}
+
+func TestIsGrokipediaNotFound(t *testing.T) {
+	if isGrokipediaNotFound(nil) {
+		t.Fatalf("expected false for nil error")
+	}
+	if !isGrokipediaNotFound(errors.New("article 'X' does not exist on Grokipedia yet")) {
+		t.Fatalf("expected true for not found error")
+	}
+	if isGrokipediaNotFound(errors.New("other error")) {
+		t.Fatalf("expected false for other errors")
+	}
+}
+
+func TestPromptGrokipediaMissingBranches(t *testing.T) {
+	out := &bytes.Buffer{}
+
+	action, refine := promptGrokipediaMissing(out, strings.NewReader("x\na\n"), "en", true)
+	if action != "another" || refine != "" {
+		t.Fatalf("expected another, got %s %q", action, refine)
+	}
+
+	action, refine = promptGrokipediaMissing(out, strings.NewReader("r\nNew Term\n"), "en", true)
+	if action != "refine" || refine != "New Term" {
+		t.Fatalf("expected refine New Term, got %s %q", action, refine)
+	}
+
+	action, refine = promptGrokipediaMissing(out, strings.NewReader("a\nq\n"), "en", false)
+	if action != "quit" || refine != "" {
+		t.Fatalf("expected quit after no-alternatives path, got %s %q", action, refine)
+	}
+
+	action, refine = promptGrokipediaMissing(out, strings.NewReader("r\n\nr\nTerm\n"), "en", false)
+	if action != "refine" || refine != "Term" {
+		t.Fatalf("expected refine Term after empty input, got %s %q", action, refine)
+	}
+
+	action, refine = promptGrokipediaMissing(out, strings.NewReader(""), "en", true)
+	if action != "quit" || refine != "" {
+		t.Fatalf("expected quit on EOF, got %s %q", action, refine)
+	}
+
+	action, refine = promptGrokipediaMissing(out, strings.NewReader("q\n"), "de", true)
+	if action != "quit" || refine != "" {
+		t.Fatalf("expected quit on german prompt, got %s %q", action, refine)
+	}
+}
+
+func TestExtractOGTitle(t *testing.T) {
+	html := `<html><head><meta property="og:title" content="Foo &amp; Bar"></head></html>`
+	title := extractOGTitle(html)
+	if title != "Foo & Bar" {
+		t.Fatalf("expected unescaped og:title, got %q", title)
+	}
+}
+
+func TestSearchGrokipediaDirectFallbackOGTitle(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head><meta property="og:title" content="Direct Title"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	q := "DirectTerm"
+	escaped := url.QueryEscape(q)
+	titles, cached, err := searchGrokipediaDirectFallback(q, escaped)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cached {
+		t.Fatalf("expected cached=false on direct fallback")
+	}
+	if len(titles) != 1 || titles[0] != "Direct Title" {
+		t.Fatalf("unexpected titles: %v", titles)
+	}
+	if cachedTitles, ok := getCachedSearch("grokipedia", escaped); !ok || len(cachedTitles) != 1 {
+		t.Fatalf("expected cached search entry")
+	}
+}
+
+func TestSearchGrokipediaDirectFallbackUsesSlug(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head><meta property="og:title" content="Grokipedia"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	q := "Some Topic"
+	escaped := url.QueryEscape(q)
+	titles, _, err := searchGrokipediaDirectFallback(q, escaped)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(titles) != 1 || titles[0] != "Some Topic" {
+		t.Fatalf("expected slug-derived title, got %v", titles)
+	}
+}
+
+func TestSearchGrokipediaDirectFallbackNon200(t *testing.T) {
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`{}`), 404, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	titles, cached, err := searchGrokipediaDirectFallback("Missing", url.QueryEscape("Missing"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cached {
+		t.Fatalf("expected cached=false on non-200")
+	}
+	if titles != nil {
+		t.Fatalf("expected nil titles on non-200")
+	}
+}
+
+func TestSearchGrokipediaUsesCache(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	calls := 0
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		calls++
+		return []string{"CachedTitle"}, nil
+	}
+
+	q := "CacheMe"
+	escaped := url.QueryEscape(q)
+	data := loadSearchCache()
+	delete(data, "grokipedia:"+escaped)
+	saveSearchCache(data)
+
+	titles, cached, err := searchGrokipedia(q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cached {
+		t.Fatalf("expected cached=false on first call")
+	}
+	if len(titles) != 1 || titles[0] != "CachedTitle" {
+		t.Fatalf("unexpected titles: %v", titles)
+	}
+
+	titles2, cached2, err2 := searchGrokipedia(q)
+	if err2 != nil {
+		t.Fatalf("unexpected error on cached call: %v", err2)
+	}
+	if !cached2 {
+		t.Fatalf("expected cached=true on second call")
+	}
+	if len(titles2) != 1 || titles2[0] != "CachedTitle" {
+		t.Fatalf("unexpected cached titles: %v", titles2)
+	}
+	if calls != 1 {
+		t.Fatalf("expected chromedp called once, got %d", calls)
+	}
+}
+
+func TestSearchGrokipediaFallbackOnChromedpError(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		return nil, errors.New("chromedp fail")
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head><meta property="og:title" content="Fallback Title"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	titles, cached, err := searchGrokipedia("FallbackTerm")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cached {
+		t.Fatalf("expected cached=false on fallback")
+	}
+	if len(titles) != 1 || titles[0] != "Fallback Title" {
+		t.Fatalf("unexpected titles: %v", titles)
+	}
+}
+
+func TestSearchGrokipediaChromeUnavailableFallback(t *testing.T) {
+	setChromeCheckResult(false, errors.New("executable file not found"))
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head><meta property="og:title" content="NoChrome Title"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	titles, cached, err := searchGrokipedia("NoChromeTerm")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cached {
+		t.Fatalf("expected cached=false on no-chrome fallback")
+	}
+	if len(titles) != 1 || titles[0] != "NoChrome Title" {
+		t.Fatalf("unexpected titles: %v", titles)
+	}
+}
+
+func TestSearchGrokipediaChromedpNoResultsFallback(t *testing.T) {
+	setChromeCheckResult(true, nil)
+	origChromedp := searchGrokipediaChromedp
+	searchGrokipediaChromedp = func(query, escapedQuery string) ([]string, error) {
+		return []string{}, nil
+	}
+	defer func() { searchGrokipediaChromedp = origChromedp }()
+
+	orig := httpGetFunc
+	httpGetFunc = func(endpoint string) ([]byte, int, string, error) {
+		return []byte(`<html><head><meta property="og:title" content="Fallback Empty"></head></html>`), 200, "text/html", nil
+	}
+	defer func() { httpGetFunc = orig }()
+
+	titles, cached, err := searchGrokipedia("EmptyResults")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cached {
+		t.Fatalf("expected cached=false on fallback")
+	}
+	if len(titles) != 1 || titles[0] != "Fallback Empty" {
+		t.Fatalf("unexpected titles: %v", titles)
+	}
+}
+
+func TestSearchGrokipediaEmptyQuery(t *testing.T) {
+	_, _, err := searchGrokipedia("   ")
+	if err == nil {
+		t.Fatalf("expected error on empty search query")
+	}
+}
+
+func TestSearchGrokipediaDirectFallbackEmptyQuery(t *testing.T) {
+	titles, cached, err := searchGrokipediaDirectFallback("   ", url.QueryEscape("   "))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cached {
+		t.Fatalf("expected cached=false on empty query")
+	}
+	if titles != nil {
+		t.Fatalf("expected nil titles on empty query fallback")
 	}
 }
 

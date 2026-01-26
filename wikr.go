@@ -57,6 +57,7 @@ func checkChromeAvailable() (bool, error) {
 			chromeAvailable = false
 		} else {
 			chromeAvailable = true
+			chromeCheckError = nil
 		}
 	})
 	return chromeAvailable, chromeCheckError
@@ -69,7 +70,7 @@ const (
 	grokipediaSearchAPITemplate = "https://grokipedia.com/search?q=%s"
 	cacheDuration               = 24 * time.Hour
 	summaryMaxLen               = 1000
-	version                     = "0.7.0"
+	version                     = "0.8.0"
 )
 
 // debug is a runtime variable (was const) so tests can toggle it to cover debug print branches.
@@ -401,6 +402,13 @@ func isTerminal(w io.Writer) bool {
 	return (stat.Mode() & os.ModeCharDevice) != 0
 }
 
+func readerFrom(in io.Reader) *bufio.Reader {
+	if r, ok := in.(*bufio.Reader); ok {
+		return r
+	}
+	return bufio.NewReader(in)
+}
+
 func truncateWithEllipsis(s string, max int) string {
 	if max <= 0 {
 		return ""
@@ -509,7 +517,8 @@ func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
 
 // chooseResult lets the user pick one of the returned titles when more than one
 // result is available.
-func chooseResult(results []string, maxResults *int, lang string, out io.Writer, in io.Reader) string {
+// It returns (title, quit, refineQuery).
+func chooseResult(results []string, maxResults *int, lang, source string, out io.Writer, in io.Reader) (string, bool, string) {
 	limit := *maxResults
 	if limit <= 0 || limit > len(results) {
 		limit = len(results)
@@ -518,15 +527,15 @@ func chooseResult(results []string, maxResults *int, lang string, out io.Writer,
 	useColor := isTerminal(out)
 	if lang == "de" {
 		if useColor {
-			color.New(color.FgCyan).Fprintf(out, "Mehrere Ergebnisse gefunden (zeige %d von %d):\n", limit, len(results))
+			color.New(color.FgCyan).Fprintf(out, "Mehrere Ergebnisse gefunden (zeige %d von %d) [Quelle: %s]:\n", limit, len(results), source)
 		} else {
-			fmt.Fprintf(out, "Mehrere Ergebnisse gefunden (zeige %d von %d):\n", limit, len(results))
+			fmt.Fprintf(out, "Mehrere Ergebnisse gefunden (zeige %d von %d) [Quelle: %s]:\n", limit, len(results), source)
 		}
 	} else {
 		if useColor {
-			color.New(color.FgCyan).Fprintf(out, "Multiple results found (showing %d of %d):\n", limit, len(results))
+			color.New(color.FgCyan).Fprintf(out, "Multiple results found (showing %d of %d) [source: %s]:\n", limit, len(results), source)
 		} else {
-			fmt.Fprintf(out, "Multiple results found (showing %d of %d):\n", limit, len(results))
+			fmt.Fprintf(out, "Multiple results found (showing %d of %d) [source: %s]:\n", limit, len(results), source)
 		}
 	}
 	for i := 0; i < limit; i++ {
@@ -534,23 +543,45 @@ func chooseResult(results []string, maxResults *int, lang string, out io.Writer,
 	}
 	fmt.Fprintln(out)
 
-	reader := bufio.NewReader(in)
+	reader := readerFrom(in)
 	for {
 		if lang == "de" {
-			fmt.Fprint(out, "Bitte eine Nummer auswählen (Standard 1): ")
+			fmt.Fprint(out, "Bitte eine Nummer auswählen (Standard 1, q=beenden, r=suche anpassen): ")
 		} else {
-			fmt.Fprint(out, "Select a result number (default 1): ")
+			fmt.Fprint(out, "Select a result number (default 1, q=quit, r=refine): ")
 		}
 		line, _ := reader.ReadString('\n')
 		line = strings.TrimSpace(line)
 		if line == "" {
-			return results[0]
+			return results[0], false, ""
+		}
+		lower := strings.ToLower(line)
+		if lower == "q" || lower == "quit" {
+			return "", true, ""
+		}
+		if lower == "r" || lower == "refine" {
+			if lang == "de" {
+				fmt.Fprint(out, "Neuen Suchbegriff eingeben: ")
+			} else {
+				fmt.Fprint(out, "Enter new search term: ")
+			}
+			newLine, _ := reader.ReadString('\n')
+			newLine = strings.TrimSpace(newLine)
+			if newLine == "" {
+				if lang == "de" {
+					fmt.Fprintln(out, "Suchbegriff darf nicht leer sein.")
+				} else {
+					fmt.Fprintln(out, "Search term must not be empty.")
+				}
+				continue
+			}
+			return "", false, newLine
 		}
 		// Attempt to parse numeric selection.
 		var idx int
 		_, err := fmt.Sscanf(line, "%d", &idx)
 		if err == nil && idx >= 1 && idx <= limit {
-			return results[idx-1]
+			return results[idx-1], false, ""
 		}
 		if lang == "de" {
 			if useColor {
@@ -642,6 +673,53 @@ func extractOGTitle(htmlContent string) string {
 	return ""
 }
 
+func isGrokipediaNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "does not exist on Grokipedia yet")
+}
+
+func probeGrokipediaTitle(title string) (bool, error) {
+	slug := slugifyGrokipedia(title)
+	if slug == "" {
+		return false, nil
+	}
+	endpoint := fmt.Sprintf(grokipediaPageAPITemplate, url.PathEscape(slug))
+	body, status, _, err := httpGetFunc(endpoint)
+	if err != nil {
+		return false, err
+	}
+	if status == http.StatusNotFound {
+		return false, nil
+	}
+	if status != http.StatusOK {
+		return false, fmt.Errorf("unexpected status %d from Grokipedia", status)
+	}
+	summary := extractMetaDescription(string(body))
+	return summary != "", nil
+}
+
+func filterGrokipediaResults(results []string, maxResults int) ([]string, error) {
+	if maxResults <= 0 {
+		maxResults = len(results)
+	}
+	valid := make([]string, 0, maxResults)
+	for _, title := range results {
+		if len(valid) >= maxResults {
+			break
+		}
+		ok, err := probeGrokipediaTitle(title)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			valid = append(valid, title)
+		}
+	}
+	return valid, nil
+}
+
 func getGrokipediaSummary(title string) (string, string, bool, error) {
 	slug := slugifyGrokipedia(title)
 	if slug == "" {
@@ -682,6 +760,82 @@ func getGrokipediaSummary(title string) (string, string, bool, error) {
 
 	setCachedEntry("grokipedia", slug, summary, endpoint)
 	return summary, endpoint, false, nil
+}
+
+func removeTitle(results []string, title string) []string {
+	if len(results) == 0 {
+		return results
+	}
+	updated := results[:0]
+	for _, t := range results {
+		if t != title {
+			updated = append(updated, t)
+		}
+	}
+	return updated
+}
+
+func promptGrokipediaMissing(out io.Writer, in io.Reader, lang string, hasAlternatives bool) (string, string) {
+	reader := readerFrom(in)
+	for {
+		if lang == "de" {
+			if hasAlternatives {
+				fmt.Fprint(out, "Artikel nicht gefunden. Anderes Ergebnis (a), Suche anpassen (r) oder beenden (q)? ")
+			} else {
+				fmt.Fprint(out, "Artikel nicht gefunden. Suche anpassen (r) oder beenden (q)? ")
+			}
+		} else {
+			if hasAlternatives {
+				fmt.Fprint(out, "Article not found. Try another (a), refine search (r), or quit (q)? ")
+			} else {
+				fmt.Fprint(out, "Article not found. Refine search (r) or quit (q)? ")
+			}
+		}
+		line, err := reader.ReadString('\n')
+		line = strings.TrimSpace(strings.ToLower(line))
+		if err != nil && line == "" {
+			return "quit", ""
+		}
+		switch line {
+		case "a", "y", "j":
+			if hasAlternatives {
+				return "another", ""
+			}
+			if lang == "de" {
+				fmt.Fprintln(out, "Keine weiteren Ergebnisse verfügbar.")
+			} else {
+				fmt.Fprintln(out, "No other results available.")
+			}
+		case "r", "refine":
+			if lang == "de" {
+				fmt.Fprint(out, "Neuen Suchbegriff eingeben: ")
+			} else {
+				fmt.Fprint(out, "Enter new search term: ")
+			}
+			newLine, err := reader.ReadString('\n')
+			newLine = strings.TrimSpace(newLine)
+			if err != nil && newLine == "" {
+				return "quit", ""
+			}
+			if newLine == "" {
+				if lang == "de" {
+					fmt.Fprintln(out, "Suchbegriff darf nicht leer sein.")
+				} else {
+					fmt.Fprintln(out, "Search term must not be empty.")
+				}
+				continue
+			}
+			return "refine", newLine
+		case "q", "quit":
+			return "quit", ""
+		default:
+			if lang == "de" {
+				fmt.Fprintln(out, "Ungültige Auswahl.")
+			} else {
+				fmt.Fprintln(out, "Invalid choice.")
+			}
+		}
+	}
 }
 
 // searchGrokipediaChromedp is the variable holding the chromedp search function.
@@ -1002,83 +1156,150 @@ func run(out io.Writer, args []string) int {
 	}
 
 	searchTerm := strings.Join(fs.Args(), " ")
+	input := bufio.NewReader(os.Stdin)
 
 	var summary, urlStr string
 	var cached bool
 
 	if *source == "grokipedia" {
-		grokEscaped := url.QueryEscape(strings.TrimSpace(searchTerm))
+	searchLoop:
+		for {
+			grokEscaped := url.QueryEscape(strings.TrimSpace(searchTerm))
 
-		var searchResults []string
-		var cachedSearch bool
-		searchResults, cachedSearch, err = searchGrokipedia(searchTerm)
-		if err != nil {
-			if titles, ok := getCachedSearch("grokipedia", grokEscaped); ok {
-				fmt.Fprintf(out, "Network error (%v). Using previously cached search results.\n", err)
-				searchResults = titles
-				cachedSearch = true
-			} else {
-				fmt.Fprintf(out, "Error during search: %v\n", err)
+			var searchResults []string
+			var cachedSearch bool
+			searchResults, cachedSearch, err = searchGrokipedia(searchTerm)
+			if err != nil {
+				if titles, ok := getCachedSearch("grokipedia", grokEscaped); ok {
+					fmt.Fprintf(out, "Network error (%v). Using previously cached search results.\n", err)
+					searchResults = titles
+					cachedSearch = true
+				} else {
+					fmt.Fprintf(out, "Error during search: %v\n", err)
+					return 1
+				}
+			}
+			if len(searchResults) == 0 {
+				if cachedSearch {
+					fmt.Fprintln(out, "Cached search results were empty.")
+				} else {
+					fmt.Fprintln(out, "No results found.")
+				}
 				return 1
 			}
-		}
-		if len(searchResults) == 0 {
-			if cachedSearch {
-				fmt.Fprintln(out, "Cached search results were empty.")
-			} else {
-				fmt.Fprintln(out, "No results found.")
+
+			if filtered, ferr := filterGrokipediaResults(searchResults, *maxResults); ferr == nil {
+				if len(filtered) == 0 {
+					fmt.Fprintln(out, "No results found.")
+					return 1
+				}
+				searchResults = filtered
 			}
-			return 1
-		}
 
-		var selectedTitle string
-		if len(searchResults) == 1 {
-			selectedTitle = searchResults[0]
-		} else {
-			selectedTitle = chooseResult(searchResults, maxResults, *lang, os.Stderr, os.Stdin)
-		}
+			for {
+				var selectedTitle string
+				if len(searchResults) == 1 {
+					selectedTitle = searchResults[0]
+				} else {
+					var quit bool
+					var refine string
+					selectedTitle, quit, refine = chooseResult(searchResults, maxResults, *lang, *source, os.Stderr, input)
+					if quit {
+						if *lang == "de" {
+							fmt.Fprintln(out, "Auswahl abgebrochen.")
+						} else {
+							fmt.Fprintln(out, "Selection canceled.")
+						}
+						return 0
+					}
+					if refine != "" {
+						searchTerm = refine
+						continue searchLoop
+					}
+				}
 
-		summary, urlStr, cached, err = getGrokipediaSummary(selectedTitle)
-		if err != nil {
-			fmt.Fprintf(out, "Error fetching summary: %v\n", err)
-			return 1
+				summary, urlStr, cached, err = getGrokipediaSummary(selectedTitle)
+				if err != nil {
+					if isGrokipediaNotFound(err) {
+						searchResults = removeTitle(searchResults, selectedTitle)
+						action, refine := promptGrokipediaMissing(os.Stderr, input, *lang, len(searchResults) > 0)
+						switch action {
+						case "another":
+							if len(searchResults) == 0 {
+								continue
+							}
+							continue
+						case "refine":
+							searchTerm = refine
+							continue searchLoop
+						case "quit":
+							if *lang == "de" {
+								fmt.Fprintln(out, "Auswahl abgebrochen.")
+							} else {
+								fmt.Fprintln(out, "Selection canceled.")
+							}
+							return 0
+						}
+					}
+					fmt.Fprintf(out, "Error fetching summary: %v\n", err)
+					return 1
+				}
+				break searchLoop
+			}
 		}
 	} else {
-		encodedSearchTerm := url.QueryEscape(searchTerm)
+		for {
+			encodedSearchTerm := url.QueryEscape(searchTerm)
 
-		var searchResults []string
-		var cachedSearch bool
-		searchResults, cachedSearch, err = searchWikipedia(*lang, encodedSearchTerm)
-		if err != nil {
-			if titles, ok := getCachedSearch(*lang, encodedSearchTerm); ok {
-				fmt.Fprintf(out, "Network error (%v). Using previously cached search results.\n", err)
-				searchResults = titles
-				cachedSearch = true
-			} else {
-				fmt.Fprintf(out, "Error during search: %v\n", err)
+			var searchResults []string
+			var cachedSearch bool
+			searchResults, cachedSearch, err = searchWikipedia(*lang, encodedSearchTerm)
+			if err != nil {
+				if titles, ok := getCachedSearch(*lang, encodedSearchTerm); ok {
+					fmt.Fprintf(out, "Network error (%v). Using previously cached search results.\n", err)
+					searchResults = titles
+					cachedSearch = true
+				} else {
+					fmt.Fprintf(out, "Error during search: %v\n", err)
+					return 1
+				}
+			}
+			if len(searchResults) == 0 {
+				if cachedSearch {
+					fmt.Fprintln(out, "Cached search results were empty.")
+				} else {
+					fmt.Fprintln(out, "No results found.")
+				}
 				return 1
 			}
-		}
-		if len(searchResults) == 0 {
-			if cachedSearch {
-				fmt.Fprintln(out, "Cached search results were empty.")
+
+			var selectedTitle string
+			if len(searchResults) == 1 {
+				selectedTitle = searchResults[0]
 			} else {
-				fmt.Fprintln(out, "No results found.")
+				var quit bool
+				var refine string
+				selectedTitle, quit, refine = chooseResult(searchResults, maxResults, *lang, *source, os.Stderr, input)
+				if quit {
+					if *lang == "de" {
+						fmt.Fprintln(out, "Auswahl abgebrochen.")
+					} else {
+						fmt.Fprintln(out, "Selection canceled.")
+					}
+					return 0
+				}
+				if refine != "" {
+					searchTerm = refine
+					continue
+				}
 			}
-			return 1
-		}
 
-		var selectedTitle string
-		if len(searchResults) == 1 {
-			selectedTitle = searchResults[0]
-		} else {
-			selectedTitle = chooseResult(searchResults, maxResults, *lang, os.Stderr, os.Stdin)
-		}
-
-		summary, urlStr, cached, err = getWikipediaSummary(*lang, selectedTitle)
-		if err != nil {
-			fmt.Fprintf(out, "Error fetching summary: %v\n", err)
-			return 1
+			summary, urlStr, cached, err = getWikipediaSummary(*lang, selectedTitle)
+			if err != nil {
+				fmt.Fprintf(out, "Error fetching summary: %v\n", err)
+				return 1
+			}
+			break
 		}
 	}
 
