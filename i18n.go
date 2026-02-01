@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -36,6 +37,8 @@ const (
 	msgChromeNotFoundError               messageKey = "chrome_not_found_error"
 	msgChromeNotFoundDetail              messageKey = "chrome_not_found_detail"
 	msgChromeNotFoundHint                messageKey = "chrome_not_found_hint"
+	msgChromeNotFoundWarning             messageKey = "chrome_not_found_warning"
+	msgChromeNotFoundWarningHint         messageKey = "chrome_not_found_warning_hint"
 	msgNetworkErrorCacheFallback         messageKey = "network_error_cache_fallback"
 	msgErrorDuringSearch                 messageKey = "error_during_search"
 	msgCachedSearchEmpty                 messageKey = "cached_search_empty"
@@ -105,4 +108,78 @@ func trRaw(lang string, key messageKey) string {
 		return tmpl
 	}
 	return fmt.Sprintf("missing translation: %s", key)
+}
+
+type localizedError struct {
+	key   messageKey
+	args  []any
+	cause error
+}
+
+func newLocalizedError(key messageKey, args ...any) *localizedError {
+	return &localizedError{key: key, args: args}
+}
+
+func wrapLocalizedError(key messageKey, cause error, args ...any) *localizedError {
+	return &localizedError{key: key, args: append(args, cause), cause: cause}
+}
+
+func (e *localizedError) Error() string {
+	return formatLocalized("en", e.key, e.args...)
+}
+
+func (e *localizedError) Localize(lang string) string {
+	return formatLocalized(lang, e.key, e.args...)
+}
+
+func (e *localizedError) Unwrap() error {
+	return e.cause
+}
+
+func formatLocalized(lang string, key messageKey, args ...any) string {
+	tmpl := trRaw(lang, key)
+	tmpl = strings.ReplaceAll(tmpl, "%w", "%v")
+	return fmt.Sprintf(tmpl, localizeArgs(lang, args)...)
+}
+
+func localizeArgs(lang string, args []any) []any {
+	if len(args) == 0 {
+		return args
+	}
+	out := make([]any, len(args))
+	for i, arg := range args {
+		if err, ok := arg.(error); ok {
+			out[i] = localizeErr(lang, err)
+			continue
+		}
+		out[i] = arg
+	}
+	return out
+}
+
+func localizeErr(lang string, err error) string {
+	if err == nil {
+		return ""
+	}
+	type localizer interface {
+		Localize(string) string
+	}
+	if le, ok := err.(localizer); ok {
+		return le.Localize(lang)
+	}
+	return err.Error()
+}
+
+func hasMessageKey(err error, key messageKey) bool {
+	for err != nil {
+		if le, ok := err.(*localizedError); ok {
+			if le.key == key {
+				return true
+			}
+			err = le.cause
+			continue
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }

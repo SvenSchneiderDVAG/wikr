@@ -29,6 +29,8 @@ var translationsEn = map[messageKey]string{
 	msgChromeNotFoundError:               "Error: Chrome/Chromium browser not found.",
 	msgChromeNotFoundDetail:              "Grokipedia search requires Chrome or Chromium to be installed on your system.",
 	msgChromeNotFoundHint:                "Please install Chrome/Chromium and try again, or use '-source wikipedia' instead.",
+	msgChromeNotFoundWarning:             "Warning: Chrome/Chromium not found. Grokipedia search requires Chrome for full functionality.",
+	msgChromeNotFoundWarningHint:         "Install Chrome or Chromium to enable full search. Falling back to direct page access.",
 	msgNetworkErrorCacheFallback:         "Network error (%v). Using previously cached search results.",
 	msgErrorDuringSearch:                 "Error during search: %v",
 	msgCachedSearchEmpty:                 "Cached search results were empty.",

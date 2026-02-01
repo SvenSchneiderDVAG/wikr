@@ -26,3 +26,10 @@ func TestTranslationsCoverage(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalizeErrUsesLanguage(t *testing.T) {
+	err := newLocalizedError(msgErrSearchUnexpectedStatus, 500)
+	if got := localizeErr("de", err); got != tr("de", msgErrSearchUnexpectedStatus, 500) {
+		t.Fatalf("expected german localized error, got %q", got)
+	}
+}

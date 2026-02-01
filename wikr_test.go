@@ -1893,7 +1893,7 @@ func TestSearchGrokipediaIntegration(t *testing.T) {
 	os.Remove(path)
 
 	// Search for a known topic
-	titles, cached, err := searchGrokipedia("Elon Musk")
+	titles, cached, err := searchGrokipedia("en", "Elon Musk")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1917,7 +1917,7 @@ func TestSearchGrokipediaIntegration(t *testing.T) {
 	}
 
 	// Second search should be cached
-	titles2, cached2, err2 := searchGrokipedia("Elon Musk")
+	titles2, cached2, err2 := searchGrokipedia("en", "Elon Musk")
 	if err2 != nil {
 		t.Fatalf("unexpected cached error: %v", err2)
 	}
@@ -2007,7 +2007,7 @@ func TestIsGrokipediaNotFound(t *testing.T) {
 	if isGrokipediaNotFound(nil) {
 		t.Fatalf("expected false for nil error")
 	}
-	if !isGrokipediaNotFound(errors.New(tr("en", msgErrGrokipediaMissingArticle, "X"))) {
+	if !isGrokipediaNotFound(newLocalizedError(msgErrGrokipediaMissingArticle, "X")) {
 		t.Fatalf("expected true for not found error")
 	}
 	if isGrokipediaNotFound(errors.New("other error")) {
@@ -2135,7 +2135,7 @@ func TestSearchGrokipediaUsesCache(t *testing.T) {
 	delete(data, "grokipedia:"+escaped)
 	saveSearchCache(data)
 
-	titles, cached, err := searchGrokipedia(q)
+	titles, cached, err := searchGrokipedia("en", q)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2146,7 +2146,7 @@ func TestSearchGrokipediaUsesCache(t *testing.T) {
 		t.Fatalf("unexpected titles: %v", titles)
 	}
 
-	titles2, cached2, err2 := searchGrokipedia(q)
+	titles2, cached2, err2 := searchGrokipedia("en", q)
 	if err2 != nil {
 		t.Fatalf("unexpected error on cached call: %v", err2)
 	}
@@ -2175,7 +2175,7 @@ func TestSearchGrokipediaFallbackOnChromedpError(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 
-	titles, cached, err := searchGrokipedia("FallbackTerm")
+	titles, cached, err := searchGrokipedia("en", "FallbackTerm")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2195,7 +2195,7 @@ func TestSearchGrokipediaChromeUnavailableFallback(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 
-	titles, cached, err := searchGrokipedia("NoChromeTerm")
+	titles, cached, err := searchGrokipedia("en", "NoChromeTerm")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2221,7 +2221,7 @@ func TestSearchGrokipediaChromedpNoResultsFallback(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 
-	titles, cached, err := searchGrokipedia("EmptyResults")
+	titles, cached, err := searchGrokipedia("en", "EmptyResults")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2234,7 +2234,7 @@ func TestSearchGrokipediaChromedpNoResultsFallback(t *testing.T) {
 }
 
 func TestSearchGrokipediaEmptyQuery(t *testing.T) {
-	_, _, err := searchGrokipedia("   ")
+	_, _, err := searchGrokipedia("en", "   ")
 	if err == nil {
 		t.Fatalf("expected error on empty search query")
 	}
