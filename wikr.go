@@ -64,7 +64,7 @@ func checkChromeAvailable() (bool, error) {
 }
 
 // ErrChromeNotFound is returned when Chrome/Chromium is not installed on the system.
-var ErrChromeNotFound = errors.New("Chrome/Chromium browser not found. Grokipedia search requires Chrome or Chromium to be installed")
+var ErrChromeNotFound = newLocalizedError(msgErrChromeNotFound)
 
 const (
 	wikipediaAPITemplate        = "https://%s.wikipedia.org/api/rest_v1/page/summary/"
@@ -73,7 +73,7 @@ const (
 	grokipediaSearchAPITemplate = "https://grokipedia.com/search?q=%s"
 	cacheDuration               = 24 * time.Hour
 	summaryMaxLen               = 1000
-	version                     = "0.8.0"
+	version                     = "0.8.1"
 )
 
 // debug is a runtime variable (was const) so tests can toggle it to cover debug print branches.
@@ -104,11 +104,11 @@ type Cache map[string]CacheEntry
 func getCachePath() (string, error) {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
-		return "", fmt.Errorf("could not find cache directory: %w", err)
+		return "", wrapLocalizedError(msgErrCacheDirNotFound, err)
 	}
 	wikrCacheDir := filepath.Join(cacheDir, "wikr")
 	if err := os.MkdirAll(wikrCacheDir, 0755); err != nil {
-		return "", fmt.Errorf("could not create cache directory: %w", err)
+		return "", wrapLocalizedError(msgErrCacheDirCreate, err)
 	}
 	return filepath.Join(wikrCacheDir, "cache.json"), nil
 }
@@ -164,11 +164,11 @@ func saveCache(cache Cache) {
 func getSearchCachePath() (string, error) {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
-		return "", fmt.Errorf("could not find cache directory: %w", err)
+		return "", wrapLocalizedError(msgErrCacheDirNotFound, err)
 	}
 	wikrCacheDir := filepath.Join(cacheDir, "wikr")
 	if err := os.MkdirAll(wikrCacheDir, 0755); err != nil {
-		return "", fmt.Errorf("could not create cache directory: %w", err)
+		return "", wrapLocalizedError(msgErrCacheDirCreate, err)
 	}
 	return filepath.Join(wikrCacheDir, "search_cache.json"), nil
 }
@@ -283,11 +283,11 @@ type Config struct {
 func getConfigPath() (string, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("could not find config directory: %w", err)
+		return "", wrapLocalizedError(msgErrConfigDirNotFound, err)
 	}
 	wikrConfigDir := filepath.Join(configDir, "wikr")
 	if err := os.MkdirAll(wikrConfigDir, 0755); err != nil {
-		return "", fmt.Errorf("could not create config directory: %w", err)
+		return "", wrapLocalizedError(msgErrConfigDirCreate, err)
 	}
 	return filepath.Join(wikrConfigDir, "config.json"), nil
 }
@@ -307,18 +307,18 @@ func loadConfig() (Config, bool, error) {
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		// Create a default config file if it doesn't exist
 		if err := saveConfig(config); err != nil {
-			return config, false, fmt.Errorf("could not create default config: %w", err)
+			return config, false, wrapLocalizedError(msgErrDefaultConfigCreate, err)
 		}
 		return config, false, nil
 	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return config, false, fmt.Errorf("error reading config file %s: %w", configPath, err)
+		return config, false, wrapLocalizedError(msgErrConfigRead, err, configPath)
 	}
 
 	if err := json.Unmarshal(data, &config); err != nil {
-		return config, false, fmt.Errorf("error decoding config: %w", err)
+		return config, false, wrapLocalizedError(msgErrConfigDecode, err)
 	}
 
 	// Validation: only allow "en" or "de" currently; fallback to en
@@ -345,10 +345,10 @@ func saveConfig(config Config) error {
 	}
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return fmt.Errorf("error encoding config: %w", err)
+		return wrapLocalizedError(msgErrConfigEncode, err)
 	}
 	if err := writeFileAtomic(configPath, data, 0644); err != nil {
-		return fmt.Errorf("error writing config file %s: %w", configPath, err)
+		return wrapLocalizedError(msgErrConfigWrite, err, configPath)
 	}
 	return nil
 }
@@ -437,25 +437,25 @@ func httpGet(endpoint string) ([]byte, int, string, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			cancel()
-			return nil, 0, "", fmt.Errorf("create request: %w", err)
+			return nil, 0, "", wrapLocalizedError(msgErrHTTPCreateRequest, err)
 		}
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("Accept", "text/html,application/json;q=0.9,*/*;q=0.8")
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			cancel()
-			lastErr = fmt.Errorf("perform request: %w", err)
+			lastErr = wrapLocalizedError(msgErrHTTPPerformRequest, err)
 		} else {
 			ct := resp.Header.Get("Content-Type")
 			body, rerr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			cancel()
 			if rerr != nil {
-				return nil, resp.StatusCode, ct, fmt.Errorf("read body: %w", rerr)
+				return nil, resp.StatusCode, ct, wrapLocalizedError(msgErrHTTPReadBody, rerr)
 			}
 			// Retry on transient HTTP codes
 			if resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 503) {
-				lastErr = fmt.Errorf("transient HTTP status %d", resp.StatusCode)
+				lastErr = newLocalizedError(msgErrHTTPTransientStatus, resp.StatusCode)
 			} else {
 				return body, resp.StatusCode, ct, nil
 			}
@@ -479,7 +479,7 @@ func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
 		return nil, false, err
 	}
 	if status != http.StatusOK {
-		return nil, false, fmt.Errorf("unexpected status %d from search endpoint", status)
+		return nil, false, newLocalizedError(msgErrSearchUnexpectedStatus, status)
 	}
 	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
 		if titles, ok := getCachedSearch(lang, escapedQuery); ok {
@@ -488,7 +488,7 @@ func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
 			}
 			return titles, true, nil
 		}
-		return nil, false, fmt.Errorf("unexpected content-type '%s' (expected application/json)", ct)
+		return nil, false, newLocalizedError(msgErrSearchUnexpectedContentType, ct)
 	}
 	var payload struct {
 		Query struct {
@@ -504,7 +504,7 @@ func searchWikipedia(lang, escapedQuery string) ([]string, bool, error) {
 			}
 			return titles, true, nil
 		}
-		return nil, false, fmt.Errorf("decode search JSON: %w", err)
+		return nil, false, wrapLocalizedError(msgErrSearchDecodeJSON, err)
 	}
 	titles := make([]string, 0, len(payload.Query.Search))
 	for _, s := range payload.Query.Search {
@@ -528,18 +528,11 @@ func chooseResult(results []string, maxResults *int, lang, source string, out io
 	}
 	fmt.Fprintln(out)
 	useColor := isTerminal(out)
-	if lang == "de" {
-		if useColor {
-			color.New(color.FgCyan).Fprintf(out, "Mehrere Ergebnisse gefunden (zeige %d von %d) [Quelle: %s]:\n", limit, len(results), source)
-		} else {
-			fmt.Fprintf(out, "Mehrere Ergebnisse gefunden (zeige %d von %d) [Quelle: %s]:\n", limit, len(results), source)
-		}
+	header := tr(lang, msgMultipleResults, limit, len(results), source)
+	if useColor {
+		color.New(color.FgCyan).Fprintln(out, header)
 	} else {
-		if useColor {
-			color.New(color.FgCyan).Fprintf(out, "Multiple results found (showing %d of %d) [source: %s]:\n", limit, len(results), source)
-		} else {
-			fmt.Fprintf(out, "Multiple results found (showing %d of %d) [source: %s]:\n", limit, len(results), source)
-		}
+		fmt.Fprintln(out, header)
 	}
 	for i := 0; i < limit; i++ {
 		fmt.Fprintf(out, "  [%d] %s\n", i+1, results[i])
@@ -548,11 +541,7 @@ func chooseResult(results []string, maxResults *int, lang, source string, out io
 
 	reader := readerFrom(in)
 	for {
-		if lang == "de" {
-			fmt.Fprint(out, "Bitte eine Nummer auswählen (Standard 1, q=beenden, r=suche anpassen): ")
-		} else {
-			fmt.Fprint(out, "Select a result number (default 1, q=quit, r=refine): ")
-		}
+		fmt.Fprint(out, tr(lang, msgSelectPrompt))
 		line, _ := reader.ReadString('\n')
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -563,19 +552,11 @@ func chooseResult(results []string, maxResults *int, lang, source string, out io
 			return "", true, ""
 		}
 		if lower == "r" || lower == "refine" {
-			if lang == "de" {
-				fmt.Fprint(out, "Neuen Suchbegriff eingeben: ")
-			} else {
-				fmt.Fprint(out, "Enter new search term: ")
-			}
+			fmt.Fprint(out, tr(lang, msgRefinePrompt))
 			newLine, _ := reader.ReadString('\n')
 			newLine = strings.TrimSpace(newLine)
 			if newLine == "" {
-				if lang == "de" {
-					fmt.Fprintln(out, "Suchbegriff darf nicht leer sein.")
-				} else {
-					fmt.Fprintln(out, "Search term must not be empty.")
-				}
+				fmt.Fprintln(out, tr(lang, msgSearchTermEmpty))
 				continue
 			}
 			return "", false, newLine
@@ -586,18 +567,11 @@ func chooseResult(results []string, maxResults *int, lang, source string, out io
 		if err == nil && idx >= 1 && idx <= limit {
 			return results[idx-1], false, ""
 		}
-		if lang == "de" {
-			if useColor {
-				color.New(color.FgYellow).Fprintf(out, "Ungültige Auswahl. Bitte eine Zahl zwischen 1 und %d eingeben.\n", limit)
-			} else {
-				fmt.Fprintf(out, "Ungültige Auswahl. Bitte eine Zahl zwischen 1 und %d eingeben.\n", limit)
-			}
+		invalidMsg := tr(lang, msgInvalidSelection, limit)
+		if useColor {
+			color.New(color.FgYellow).Fprintln(out, invalidMsg)
 		} else {
-			if useColor {
-				color.New(color.FgYellow).Fprintf(out, "Invalid selection. Please enter a number between 1 and %d.\n", limit)
-			} else {
-				fmt.Fprintf(out, "Invalid selection. Please enter a number between 1 and %d.\n", limit)
-			}
+			fmt.Fprintln(out, invalidMsg)
 		}
 	}
 }
@@ -612,34 +586,34 @@ func getWikipediaSummary(lang, title string) (string, string, bool, error) {
 		return "", "", false, err
 	}
 	if status != http.StatusOK {
-		return "", "", false, fmt.Errorf("unexpected status %d from summary endpoint", status)
+		return "", "", false, newLocalizedError(msgErrSummaryUnexpectedStatus, status)
 	}
 	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
-		return "", "", false, fmt.Errorf("unexpected content-type '%s'", ct)
+		return "", "", false, newLocalizedError(msgErrSummaryUnexpectedContentType, ct)
 	}
 	var result map[string]any
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", "", false, fmt.Errorf("decode summary JSON: %w", err)
+		return "", "", false, wrapLocalizedError(msgErrSummaryDecodeJSON, err)
 	}
 	extractVal, ok := result["extract"]
 	if !ok {
-		return "", "", false, errors.New("missing 'extract' in response")
+		return "", "", false, newLocalizedError(msgErrSummaryMissingExtract)
 	}
 	extractStr, ok := extractVal.(string)
 	if !ok {
-		return "", "", false, errors.New("'extract' field not a string")
+		return "", "", false, newLocalizedError(msgErrSummaryExtractNotString)
 	}
 	contentURLs, ok := result["content_urls"].(map[string]any)
 	if !ok {
-		return "", "", false, errors.New("missing content_urls")
+		return "", "", false, newLocalizedError(msgErrSummaryMissingContentURLs)
 	}
 	desktop, ok := contentURLs["desktop"].(map[string]any)
 	if !ok {
-		return "", "", false, errors.New("missing desktop in content_urls")
+		return "", "", false, newLocalizedError(msgErrSummaryMissingDesktop)
 	}
 	pageURL, ok := desktop["page"].(string)
 	if !ok {
-		return "", "", false, errors.New("missing page URL")
+		return "", "", false, newLocalizedError(msgErrSummaryMissingPageURL)
 	}
 	extractStr = truncateWithEllipsis(extractStr, summaryMaxLen)
 	setCachedEntry(lang, title, extractStr, pageURL)
@@ -680,7 +654,7 @@ func isGrokipediaNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "does not exist on Grokipedia yet")
+	return hasMessageKey(err, msgErrGrokipediaMissingArticle)
 }
 
 func probeGrokipediaTitle(title string) (bool, error) {
@@ -697,7 +671,7 @@ func probeGrokipediaTitle(title string) (bool, error) {
 		return false, nil
 	}
 	if status != http.StatusOK {
-		return false, fmt.Errorf("unexpected status %d from Grokipedia", status)
+		return false, newLocalizedError(msgErrGrokipediaUnexpectedStatus, status)
 	}
 	summary := extractMetaDescription(string(body))
 	return summary != "", nil
@@ -726,7 +700,7 @@ func filterGrokipediaResults(results []string, maxResults int) ([]string, error)
 func getGrokipediaSummary(title string) (string, string, bool, error) {
 	slug := slugifyGrokipedia(title)
 	if slug == "" {
-		return "", "", false, errors.New("empty title")
+		return "", "", false, newLocalizedError(msgErrGrokipediaEmptyTitle)
 	}
 	if summary, urlStr, found := getCachedEntry("grokipedia", slug); found {
 		return summary, urlStr, true, nil
@@ -744,11 +718,11 @@ func getGrokipediaSummary(title string) (string, string, bool, error) {
 
 	// Check for 404 status
 	if status == http.StatusNotFound {
-		return "", "", false, fmt.Errorf("article '%s' does not exist on Grokipedia yet", title)
+		return "", "", false, newLocalizedError(msgErrGrokipediaMissingArticle, title)
 	}
 
 	if status != http.StatusOK {
-		return "", "", false, fmt.Errorf("unexpected status %d from Grokipedia", status)
+		return "", "", false, newLocalizedError(msgErrGrokipediaUnexpectedStatus, status)
 	}
 
 	// Extract summary from meta description tag
@@ -756,7 +730,7 @@ func getGrokipediaSummary(title string) (string, string, bool, error) {
 	summary := extractMetaDescription(htmlContent)
 
 	if summary == "" {
-		return "", "", false, fmt.Errorf("article '%s' does not exist on Grokipedia yet", title)
+		return "", "", false, newLocalizedError(msgErrGrokipediaMissingArticle, title)
 	}
 
 	summary = truncateWithEllipsis(summary, summaryMaxLen)
@@ -781,19 +755,11 @@ func removeTitle(results []string, title string) []string {
 func promptGrokipediaMissing(out io.Writer, in io.Reader, lang string, hasAlternatives bool) (string, string) {
 	reader := readerFrom(in)
 	for {
-		if lang == "de" {
-			if hasAlternatives {
-				fmt.Fprint(out, "Artikel nicht gefunden. Anderes Ergebnis (a), Suche anpassen (r) oder beenden (q)? ")
-			} else {
-				fmt.Fprint(out, "Artikel nicht gefunden. Suche anpassen (r) oder beenden (q)? ")
-			}
-		} else {
-			if hasAlternatives {
-				fmt.Fprint(out, "Article not found. Try another (a), refine search (r), or quit (q)? ")
-			} else {
-				fmt.Fprint(out, "Article not found. Refine search (r) or quit (q)? ")
-			}
+		promptKey := msgArticleNotFoundNoAlt
+		if hasAlternatives {
+			promptKey = msgArticleNotFoundAlt
 		}
+		fmt.Fprint(out, tr(lang, promptKey))
 		line, err := reader.ReadString('\n')
 		line = strings.TrimSpace(strings.ToLower(line))
 		if err != nil && line == "" {
@@ -804,39 +770,23 @@ func promptGrokipediaMissing(out io.Writer, in io.Reader, lang string, hasAltern
 			if hasAlternatives {
 				return "another", ""
 			}
-			if lang == "de" {
-				fmt.Fprintln(out, "Keine weiteren Ergebnisse verfügbar.")
-			} else {
-				fmt.Fprintln(out, "No other results available.")
-			}
+			fmt.Fprintln(out, tr(lang, msgNoOtherResults))
 		case "r", "refine":
-			if lang == "de" {
-				fmt.Fprint(out, "Neuen Suchbegriff eingeben: ")
-			} else {
-				fmt.Fprint(out, "Enter new search term: ")
-			}
+			fmt.Fprint(out, tr(lang, msgRefinePrompt))
 			newLine, err := reader.ReadString('\n')
 			newLine = strings.TrimSpace(newLine)
 			if err != nil && newLine == "" {
 				return "quit", ""
 			}
 			if newLine == "" {
-				if lang == "de" {
-					fmt.Fprintln(out, "Suchbegriff darf nicht leer sein.")
-				} else {
-					fmt.Fprintln(out, "Search term must not be empty.")
-				}
+				fmt.Fprintln(out, tr(lang, msgSearchTermEmpty))
 				continue
 			}
 			return "refine", newLine
 		case "q", "quit":
 			return "quit", ""
 		default:
-			if lang == "de" {
-				fmt.Fprintln(out, "Ungültige Auswahl.")
-			} else {
-				fmt.Fprintln(out, "Invalid choice.")
-			}
+			fmt.Fprintln(out, tr(lang, msgInvalidChoice))
 		}
 	}
 }
@@ -964,7 +914,7 @@ func searchGrokipediaChromedpImpl(query string, escapedQuery string) ([]string, 
 
 // searchGrokipedia searches Grokipedia using chromedp for browser automation.
 // Results are cached to avoid repeated browser launches.
-func searchGrokipedia(query string) ([]string, bool, error) {
+func searchGrokipedia(lang string, query string) ([]string, bool, error) {
 	trimmed := strings.TrimSpace(query)
 	escapedQuery := url.QueryEscape(trimmed)
 	if titles, ok := getCachedSearch("grokipedia", escapedQuery); ok {
@@ -972,7 +922,7 @@ func searchGrokipedia(query string) ([]string, bool, error) {
 	}
 
 	if trimmed == "" {
-		return nil, false, errors.New("empty search query")
+		return nil, false, newLocalizedError(msgErrGrokipediaEmptySearchQuery)
 	}
 
 	if debug {
@@ -985,8 +935,8 @@ func searchGrokipedia(query string) ([]string, bool, error) {
 			if err != nil && (strings.Contains(err.Error(), "executable file not found") ||
 				strings.Contains(err.Error(), "not found") ||
 				strings.Contains(err.Error(), "no such file")) {
-				fmt.Fprintf(os.Stderr, "Warning: Chrome/Chromium not found. Grokipedia search requires Chrome for full functionality.\n")
-				fmt.Fprintf(os.Stderr, "         Install Chrome or Chromium to enable full search. Falling back to direct page access.\n")
+				fmt.Fprintln(os.Stderr, tr(lang, msgChromeNotFoundWarning))
+				fmt.Fprintln(os.Stderr, tr(lang, msgChromeNotFoundWarningHint))
 			} else if err != nil && debug {
 				fmt.Printf("Chrome check failed: %v\n", err)
 			}
@@ -1063,11 +1013,11 @@ func searchGrokipediaDirectFallback(query, escapedQuery string) ([]string, bool,
 func clearCache() error {
 	cachePath, err := getCachePath()
 	if err != nil {
-		return fmt.Errorf("error getting cache path: %w", err)
+		return wrapLocalizedError(msgErrCachePath, err)
 	}
 	err = os.Remove(cachePath)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("error deleting cache file: %v", err)
+		return newLocalizedError(msgErrCacheDeleteFile, err)
 	}
 	if debug {
 		fmt.Println("Cache was deleted successfully.")
@@ -1075,34 +1025,54 @@ func clearCache() error {
 	return nil
 }
 
+func langFromArgs(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-lang" || args[i] == "--lang":
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", true
+		case strings.HasPrefix(args[i], "-lang="):
+			return strings.TrimPrefix(args[i], "-lang="), true
+		case strings.HasPrefix(args[i], "--lang="):
+			return strings.TrimPrefix(args[i], "--lang="), true
+		}
+	}
+	return "", false
+}
+
 // run encapsulates the CLI logic; args should exclude the program name (like os.Args[1:]).
 // It writes user-facing output to out and returns an exit code (0 success, >0 failure).
 func run(out io.Writer, args []string) int {
 	// Ensure color output goes to out if it's stdout; we keep using global color functions.
+	fallbackLang := "en"
+	if argLang, ok := langFromArgs(args); ok {
+		fallbackLang = normalizeLang(argLang)
+	}
 	config, corrected, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(out, "Warning: could not load config: %v\n", err)
-		config = Config{Language: "en", MaxResults: 5}
+		fmt.Fprintln(out, tr(fallbackLang, msgWarningConfigLoad, localizeErr(fallbackLang, err)))
+		config = Config{Language: fallbackLang, MaxResults: 5}
 	} else if corrected {
 		if err := saveConfig(config); err != nil && debug {
-			fmt.Fprintf(out, "Could not persist corrected config: %v\n", err)
+			fmt.Fprintln(out, tr(config.Language, msgConfigPersistWarning, localizeErr(config.Language, err)))
 		}
 	}
 
 	fs := flag.NewFlagSet("wikr", flag.ContinueOnError)
 	fs.SetOutput(out)
+	lang := fs.String("lang", config.Language, tr(config.Language, msgFlagLang))
+	source := fs.String("source", config.Source, tr(config.Language, msgFlagSource))
+	maxResults := fs.Int("max", config.MaxResults, tr(config.Language, msgFlagMax))
+	isClearCache := fs.Bool("clear-cache", false, tr(config.Language, msgFlagClearCache))
+	isVersion := fs.Bool("version", false, tr(config.Language, msgFlagVersion))
+	isResetConfig := fs.Bool("reset-config", false, tr(config.Language, msgFlagResetConfig))
 	fs.Usage = func() {
-		fmt.Fprintf(out, "Usage: wikr [options] <search term>\n\n")
-		fmt.Fprintf(out, "Options:\n")
+		fmt.Fprint(out, tr(*lang, msgUsage))
+		fmt.Fprint(out, tr(*lang, msgOptions))
 		fs.PrintDefaults()
 	}
-
-	lang := fs.String("lang", config.Language, "language of the Wikipedia to use (en|de)")
-	source := fs.String("source", config.Source, "content source (wikipedia|grokipedia)")
-	maxResults := fs.Int("max", config.MaxResults, "maximum amount of result entries")
-	isClearCache := fs.Bool("clear-cache", false, "clear the cache")
-	isVersion := fs.Bool("version", false, "show version")
-	isResetConfig := fs.Bool("reset-config", false, "regenerate default configuration and exit")
 
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -1114,10 +1084,10 @@ func run(out io.Writer, args []string) int {
 	if *isResetConfig {
 		defaultCfg := Config{Language: "en", MaxResults: 5, Source: "wikipedia"}
 		if err := saveConfig(defaultCfg); err != nil {
-			fmt.Fprintf(out, "Error writing default config: %v\n", err)
+			fmt.Fprintln(out, tr(*lang, msgErrorWriteDefaultConfig, localizeErr(*lang, err)))
 			return 1
 		}
-		fmt.Fprintln(out, "Configuration reset to defaults (language=en, max_results=5, source=wikipedia)")
+		fmt.Fprintln(out, tr(*lang, msgConfigReset))
 		return 0
 	}
 
@@ -1126,7 +1096,7 @@ func run(out io.Writer, args []string) int {
 		src = "wikipedia"
 	}
 	if src != "wikipedia" && src != "grokipedia" {
-		fmt.Fprintf(out, "Invalid source '%s'. Allowed: wikipedia, grokipedia.\n", src)
+		fmt.Fprintln(out, tr(*lang, msgInvalidSource, src))
 		return 2
 	}
 	*source = src
@@ -1154,20 +1124,20 @@ func run(out io.Writer, args []string) int {
 	})
 	if configChanged {
 		if err := saveConfig(config); err != nil {
-			fmt.Fprintf(out, "Warning: could not save config: %v\n", err)
+			fmt.Fprintln(out, tr(*lang, msgWarningSaveConfig, localizeErr(*lang, err)))
 		}
 	}
 
 	if *isClearCache {
 		if err := clearCache(); err != nil {
-			fmt.Fprintln(out, err)
+			fmt.Fprintln(out, localizeErr(*lang, err))
 			return 1
 		}
-		fmt.Fprintln(out, "Cache cleared")
+		fmt.Fprintln(out, tr(*lang, msgCacheCleared))
 		return 0
 	}
 	if *isVersion {
-		fmt.Fprintf(out, "Version: %s\n", version)
+		fmt.Fprintln(out, tr(*lang, msgVersion, version))
 		return 0
 	}
 
@@ -1189,35 +1159,35 @@ func run(out io.Writer, args []string) int {
 
 			var searchResults []string
 			var cachedSearch bool
-			searchResults, cachedSearch, err = searchGrokipedia(searchTerm)
+			searchResults, cachedSearch, err = searchGrokipedia(*lang, searchTerm)
 			if err != nil {
 				if errors.Is(err, ErrChromeNotFound) {
-					fmt.Fprintln(out, "Error: Chrome/Chromium browser not found.")
-					fmt.Fprintln(out, "Grokipedia search requires Chrome or Chromium to be installed on your system.")
-					fmt.Fprintln(out, "Please install Chrome/Chromium and try again, or use '-source wikipedia' instead.")
+					fmt.Fprintln(out, tr(*lang, msgChromeNotFoundError))
+					fmt.Fprintln(out, tr(*lang, msgChromeNotFoundDetail))
+					fmt.Fprintln(out, tr(*lang, msgChromeNotFoundHint))
 					return 1
 				}
 				if titles, ok := getCachedSearch("grokipedia", grokEscaped); ok {
-					fmt.Fprintf(out, "Network error (%v). Using previously cached search results.\n", err)
+					fmt.Fprintln(out, tr(*lang, msgNetworkErrorCacheFallback, localizeErr(*lang, err)))
 					searchResults = titles
 					cachedSearch = true
 				} else {
-					fmt.Fprintf(out, "Error during search: %v\n", err)
+					fmt.Fprintln(out, tr(*lang, msgErrorDuringSearch, localizeErr(*lang, err)))
 					return 1
 				}
 			}
 			if len(searchResults) == 0 {
 				if cachedSearch {
-					fmt.Fprintln(out, "Cached search results were empty.")
+					fmt.Fprintln(out, tr(*lang, msgCachedSearchEmpty))
 				} else {
-					fmt.Fprintln(out, "No results found.")
+					fmt.Fprintln(out, tr(*lang, msgNoResults))
 				}
 				return 1
 			}
 
 			if filtered, ferr := filterGrokipediaResults(searchResults, *maxResults); ferr == nil {
 				if len(filtered) == 0 {
-					fmt.Fprintln(out, "No results found.")
+					fmt.Fprintln(out, tr(*lang, msgNoResults))
 					return 1
 				}
 				searchResults = filtered
@@ -1232,11 +1202,7 @@ func run(out io.Writer, args []string) int {
 					var refine string
 					selectedTitle, quit, refine = chooseResult(searchResults, maxResults, *lang, *source, os.Stderr, input)
 					if quit {
-						if *lang == "de" {
-							fmt.Fprintln(out, "Auswahl abgebrochen.")
-						} else {
-							fmt.Fprintln(out, "Selection canceled.")
-						}
+						fmt.Fprintln(out, tr(*lang, msgSelectionCanceled))
 						return 0
 					}
 					if refine != "" {
@@ -1260,15 +1226,11 @@ func run(out io.Writer, args []string) int {
 							searchTerm = refine
 							continue searchLoop
 						case "quit":
-							if *lang == "de" {
-								fmt.Fprintln(out, "Auswahl abgebrochen.")
-							} else {
-								fmt.Fprintln(out, "Selection canceled.")
-							}
+							fmt.Fprintln(out, tr(*lang, msgSelectionCanceled))
 							return 0
 						}
 					}
-					fmt.Fprintf(out, "Error fetching summary: %v\n", err)
+					fmt.Fprintln(out, tr(*lang, msgErrorFetchingSummary, localizeErr(*lang, err)))
 					return 1
 				}
 				break searchLoop
@@ -1283,19 +1245,19 @@ func run(out io.Writer, args []string) int {
 			searchResults, cachedSearch, err = searchWikipedia(*lang, encodedSearchTerm)
 			if err != nil {
 				if titles, ok := getCachedSearch(*lang, encodedSearchTerm); ok {
-					fmt.Fprintf(out, "Network error (%v). Using previously cached search results.\n", err)
+					fmt.Fprintln(out, tr(*lang, msgNetworkErrorCacheFallback, localizeErr(*lang, err)))
 					searchResults = titles
 					cachedSearch = true
 				} else {
-					fmt.Fprintf(out, "Error during search: %v\n", err)
+					fmt.Fprintln(out, tr(*lang, msgErrorDuringSearch, localizeErr(*lang, err)))
 					return 1
 				}
 			}
 			if len(searchResults) == 0 {
 				if cachedSearch {
-					fmt.Fprintln(out, "Cached search results were empty.")
+					fmt.Fprintln(out, tr(*lang, msgCachedSearchEmpty))
 				} else {
-					fmt.Fprintln(out, "No results found.")
+					fmt.Fprintln(out, tr(*lang, msgNoResults))
 				}
 				return 1
 			}
@@ -1308,11 +1270,7 @@ func run(out io.Writer, args []string) int {
 				var refine string
 				selectedTitle, quit, refine = chooseResult(searchResults, maxResults, *lang, *source, os.Stderr, input)
 				if quit {
-					if *lang == "de" {
-						fmt.Fprintln(out, "Auswahl abgebrochen.")
-					} else {
-						fmt.Fprintln(out, "Selection canceled.")
-					}
+					fmt.Fprintln(out, tr(*lang, msgSelectionCanceled))
 					return 0
 				}
 				if refine != "" {
@@ -1323,7 +1281,7 @@ func run(out io.Writer, args []string) int {
 
 			summary, urlStr, cached, err = getWikipediaSummary(*lang, selectedTitle)
 			if err != nil {
-				fmt.Fprintf(out, "Error fetching summary: %v\n", err)
+				fmt.Fprintln(out, tr(*lang, msgErrorFetchingSummary, localizeErr(*lang, err)))
 				return 1
 			}
 			break
@@ -1337,31 +1295,23 @@ func run(out io.Writer, args []string) int {
 		cachedColor := color.New(color.FgYellow)
 		urlLabelColor := color.New(color.FgMagenta, color.Bold)
 		linkColor := color.New(color.FgBlue, color.Underline)
-		if *lang == "de" {
-			headerColor.Fprintln(out, "\n\nZusammenfassung:")
-		} else {
-			headerColor.Fprintln(out, "\n\nSummary:")
-		}
+		headerColor.Fprintln(out, "\n\n"+tr(*lang, msgSummaryHeader))
 		if cached {
-			cachedColor.Fprintln(out, "(cached)")
+			cachedColor.Fprintln(out, tr(*lang, msgCachedMarker))
 		}
 		fmt.Fprintln(out, summary)
-		urlLabelColor.Fprintln(out, "\nURL:")
+		urlLabelColor.Fprintln(out, "\n"+tr(*lang, msgURLLabel))
 		linkColor.Fprintln(out, urlStr)
 		return 0
 	}
 
 	// Non-terminal (e.g., tests, piped output): keep plain text.
-	if *lang == "de" {
-		fmt.Fprintln(out, "\n\nZusammenfassung:")
-	} else {
-		fmt.Fprintln(out, "\n\nSummary:")
-	}
+	fmt.Fprintln(out, "\n\n"+tr(*lang, msgSummaryHeader))
 	if cached {
-		fmt.Fprintln(out, "(cached)")
+		fmt.Fprintln(out, tr(*lang, msgCachedMarker))
 	}
 	fmt.Fprintln(out, summary)
-	fmt.Fprintln(out, "\nURL:")
+	fmt.Fprintln(out, "\n"+tr(*lang, msgURLLabel))
 	fmt.Fprintln(out, urlStr)
 	return 0
 }

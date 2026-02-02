@@ -37,6 +37,21 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func assertContainsAny(t *testing.T, out string, options ...string) {
+	t.Helper()
+	for _, option := range options {
+		if strings.Contains(out, option) {
+			return
+		}
+	}
+	t.Fatalf("expected output to contain one of %v, got %s", options, out)
+}
+
+func assertContainsTranslation(t *testing.T, out string, key messageKey, args ...any) {
+	t.Helper()
+	assertContainsAny(t, out, tr("en", key, args...), tr("de", key, args...))
+}
+
 func TestGetCachePath(t *testing.T) {
 	path, err := getCachePath()
 	if err != nil {
@@ -507,9 +522,10 @@ func TestSummaryContentTypeError(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 	_, _, _, err := getWikipediaSummary("en", "CTErrorTest")
-	if err == nil || !strings.Contains(err.Error(), "unexpected content-type") {
+	if err == nil {
 		t.Fatalf("expected content-type error, got %v", err)
 	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrSummaryUnexpectedContentType, "text/html"), tr("de", msgErrSummaryUnexpectedContentType, "text/html"))
 }
 
 // ====== Tests for run() to increase coverage over flag and argument branches ======
@@ -520,9 +536,7 @@ func TestRunVersion(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
-	if !strings.Contains(buf.String(), "Version:") {
-		t.Fatalf("expected version output, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgVersion, version)
 }
 
 func TestRunNoArgsShowsUsage(t *testing.T) {
@@ -531,9 +545,7 @@ func TestRunNoArgsShowsUsage(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code for no args")
 	}
-	if !strings.Contains(buf.String(), "Usage:") {
-		t.Fatalf("expected usage text, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgUsage)
 }
 
 func TestRunInvalidFlag(t *testing.T) {
@@ -553,9 +565,7 @@ func TestRunHelpFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
-	if !strings.Contains(buf.String(), "Usage:") {
-		t.Fatalf("expected usage text, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgUsage)
 }
 
 func TestRunResetConfig(t *testing.T) {
@@ -564,9 +574,7 @@ func TestRunResetConfig(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
-	if !strings.Contains(buf.String(), "Configuration reset") {
-		t.Fatalf("expected reset message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgConfigReset)
 }
 
 func TestRunClearCache(t *testing.T) {
@@ -577,9 +585,7 @@ func TestRunClearCache(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
-	if !strings.Contains(buf.String(), "Cache cleared") {
-		t.Fatalf("expected cache cleared message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgCacheCleared)
 }
 
 func TestRunClearCacheError(t *testing.T) {
@@ -600,9 +606,7 @@ func TestRunClearCacheError(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit on clear cache error")
 	}
-	if !strings.Contains(buf.String(), "error deleting cache file") {
-		t.Fatalf("expected delete error, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgErrCacheDeleteFile, "")
 }
 
 func TestRunSearchAndSummaryEnglish(t *testing.T) {
@@ -631,9 +635,7 @@ func TestRunSearchAndSummaryEnglish(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d; output=%s", code, buf.String())
 	}
 	out := buf.String()
-	if !strings.Contains(out, "Summary:") {
-		t.Fatalf("expected Summary header, got %s", out)
-	}
+	assertContainsTranslation(t, out, msgSummaryHeader)
 	if !strings.Contains(out, "Short summary") {
 		t.Fatalf("expected summary text, got %s", out)
 	}
@@ -705,9 +707,7 @@ func TestRunConfigLoadErrorWarns(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
-	if !strings.Contains(buf.String(), "Warning: could not load config") {
-		t.Fatalf("expected warning message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgWarningConfigLoad, "")
 }
 
 func TestRunInvalidSource(t *testing.T) {
@@ -716,9 +716,7 @@ func TestRunInvalidSource(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("expected exit 2, got %d", code)
 	}
-	if !strings.Contains(buf.String(), "Invalid source") {
-		t.Fatalf("expected invalid source message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgInvalidSource, "invalid")
 }
 
 func TestRunQuitSelection(t *testing.T) {
@@ -746,9 +744,7 @@ func TestRunQuitSelection(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0 on quit, got %d; output=%s", code, buf.String())
 	}
-	if !strings.Contains(buf.String(), "Selection canceled.") {
-		t.Fatalf("expected cancel message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgSelectionCanceled)
 }
 
 func TestRunGrokipediaRefineFlow(t *testing.T) {
@@ -815,9 +811,7 @@ func TestRunGrokipediaNoResults(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for no results")
 	}
-	if !strings.Contains(buf.String(), "No results found.") {
-		t.Fatalf("expected no results message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgNoResults)
 }
 
 func TestRunGrokipediaQuitSelection(t *testing.T) {
@@ -848,9 +842,7 @@ func TestRunGrokipediaQuitSelection(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0 on quit, got %d; output=%s", code, buf.String())
 	}
-	if !strings.Contains(buf.String(), "Selection canceled.") {
-		t.Fatalf("expected cancel message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgSelectionCanceled)
 }
 
 func TestRunGrokipediaMissingThenAnother(t *testing.T) {
@@ -920,9 +912,7 @@ func TestRunGrokipediaFilteredEmpty(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for filtered empty results")
 	}
-	if !strings.Contains(buf.String(), "No results found.") {
-		t.Fatalf("expected no results message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgNoResults)
 }
 
 func TestRunGrokipediaFilterErrorFallback(t *testing.T) {
@@ -969,9 +959,7 @@ func TestRunSearchAndSummaryGerman(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "Zusammenfassung:") {
-		t.Fatalf("expected German header, got %s", out)
-	}
+	assertContainsTranslation(t, out, msgSummaryHeader)
 	if !strings.Contains(out, "Kurze Zusammenfassung") {
 		t.Fatalf("expected summarized text, got %s", out)
 	}
@@ -986,9 +974,7 @@ func TestRunNetworkErrorFallbackFailure(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit on network error without cache")
 	}
-	if !strings.Contains(buf.String(), "Error during search") {
-		t.Fatalf("expected error message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgErrorDuringSearch, io.EOF)
 }
 
 // ===== Additional tests to cover remaining branches =====
@@ -1020,9 +1006,10 @@ func TestSearchWikipediaNonJSONNoCache(t *testing.T) {
 	defer func() { httpGetFunc = orig }()
 	q := urlQueryEscapeHelper("NonJSONNoCache")
 	_, _, err := searchWikipedia("en", q)
-	if err == nil || !strings.Contains(err.Error(), "unexpected content-type") {
+	if err == nil {
 		t.Fatalf("expected content-type error, got %v", err)
 	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrSearchUnexpectedContentType, "text/plain"), tr("de", msgErrSearchUnexpectedContentType, "text/plain"))
 }
 
 func TestSearchWikipediaHTTPStatusError(t *testing.T) {
@@ -1033,9 +1020,10 @@ func TestSearchWikipediaHTTPStatusError(t *testing.T) {
 	defer func() { httpGetFunc = orig }()
 	q := urlQueryEscapeHelper("StatusErr")
 	_, _, err := searchWikipedia("en", q)
-	if err == nil || !strings.Contains(err.Error(), "unexpected status") {
+	if err == nil {
 		t.Fatalf("expected status error, got %v", err)
 	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrSearchUnexpectedStatus, 500), tr("de", msgErrSearchUnexpectedStatus, 500))
 }
 
 func TestChooseResultInvalidSelection(t *testing.T) {
@@ -1094,22 +1082,20 @@ func TestChooseResultRefineEmptyThenSelect(t *testing.T) {
 	if sel != "Beta" {
 		t.Fatalf("expected Beta after empty refine then selection, got %s", sel)
 	}
-	if !strings.Contains(out.String(), "source: wikipedia") {
-		t.Fatalf("expected source label in output, got %s", out.String())
-	}
+	assertContainsTranslation(t, out.String(), msgMultipleResults, 3, 3, "wikipedia")
 }
 
 func TestGetWikipediaSummaryErrorBranches(t *testing.T) {
 	cases := []struct {
-		name    string
-		body    string
-		wantSub string
+		name string
+		body string
+		key  messageKey
 	}{
-		{"missingExtract", `{"content_urls":{"desktop":{"page":"https://example.org/X"}}}`, "missing 'extract'"},
-		{"extractNotString", `{"extract":123, "content_urls":{"desktop":{"page":"https://example.org/X"}}}`, "'extract' field not a string"},
-		{"missingContentURLs", `{"extract":"x"}`, "missing content_urls"},
-		{"missingDesktop", `{"extract":"x","content_urls":{}}`, "missing desktop"},
-		{"missingPage", `{"extract":"x","content_urls":{"desktop":{}}}`, "missing page URL"},
+		{"missingExtract", `{"content_urls":{"desktop":{"page":"https://example.org/X"}}}`, msgErrSummaryMissingExtract},
+		{"extractNotString", `{"extract":123, "content_urls":{"desktop":{"page":"https://example.org/X"}}}`, msgErrSummaryExtractNotString},
+		{"missingContentURLs", `{"extract":"x"}`, msgErrSummaryMissingContentURLs},
+		{"missingDesktop", `{"extract":"x","content_urls":{}}`, msgErrSummaryMissingDesktop},
+		{"missingPage", `{"extract":"x","content_urls":{"desktop":{}}}`, msgErrSummaryMissingPageURL},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1119,9 +1105,10 @@ func TestGetWikipediaSummaryErrorBranches(t *testing.T) {
 			}
 			defer func() { httpGetFunc = orig }()
 			_, _, _, err := getWikipediaSummary("en", "ErrCase"+tc.name)
-			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
-				t.Fatalf("expected error containing %q, got %v", tc.wantSub, err)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got %v", tc.key, err)
 			}
+			assertContainsAny(t, err.Error(), tr("en", tc.key), tr("de", tc.key))
 		})
 	}
 }
@@ -1131,9 +1118,10 @@ func TestGetWikipediaSummaryHTTPStatusError(t *testing.T) {
 	httpGetFunc = func(endpoint string) ([]byte, int, string, error) { return []byte("{}"), 500, "application/json", nil }
 	defer func() { httpGetFunc = orig }()
 	_, _, _, err := getWikipediaSummary("en", "StatusFail")
-	if err == nil || !strings.Contains(err.Error(), "unexpected status") {
+	if err == nil {
 		t.Fatalf("expected status error, got %v", err)
 	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrSummaryUnexpectedStatus, 500), tr("de", msgErrSummaryUnexpectedStatus, 500))
 }
 
 func TestRunConfigCorrectionPath(t *testing.T) {
@@ -1243,9 +1231,7 @@ func TestRunMaxLimitOneList(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d -- out=%s", code, buf.String())
 	}
 	out := buf.String()
-	if !strings.Contains(out, "Summary:") {
-		t.Fatalf("expected English summary header, got %s", out)
-	}
+	assertContainsTranslation(t, out, msgSummaryHeader)
 	if !strings.Contains(out, "Limited summary") {
 		t.Fatalf("expected summary text")
 	}
@@ -1283,9 +1269,7 @@ func TestRunCachedSearchAndSummary(t *testing.T) {
 		t.Fatalf("second run unexpected exit %d: %s", code, buf2.String())
 	}
 	out2 := buf2.String()
-	if !strings.Contains(out2, "Summary:") && !strings.Contains(out2, "Zusammenfassung:") {
-		t.Fatalf("expected summary header on second run")
-	}
+	assertContainsTranslation(t, out2, msgSummaryHeader)
 	if !strings.Contains(out2, "Cached summary body") {
 		t.Fatalf("expected cached summary body second run")
 	}
@@ -1348,9 +1332,7 @@ func TestRunEmptyResultsNoCache(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code for no results")
 	}
-	if !strings.Contains(buf.String(), "No results found.") {
-		t.Fatalf("expected 'No results found.' message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgNoResults)
 }
 
 // TestRunEmptyResultsCached covers branch printing "Cached search results were empty.".
@@ -1370,9 +1352,7 @@ func TestRunEmptyResultsCached(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code for empty cached results")
 	}
-	if !strings.Contains(buf.String(), "Cached search results were empty.") {
-		t.Fatalf("expected cached empty message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgCachedSearchEmpty)
 }
 
 // TestRunSummaryError covers branch where summary fetch fails after successful search.
@@ -1390,9 +1370,7 @@ func TestRunSummaryError(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code on summary error")
 	}
-	if !strings.Contains(buf.String(), "Error fetching summary") {
-		t.Fatalf("expected summary error message, got %s", buf.String())
-	}
+	assertContainsTranslation(t, buf.String(), msgErrorFetchingSummary, "")
 }
 
 // TestRunSummaryCachedIndicator covers printing of (cached) marker.
@@ -1415,9 +1393,7 @@ func TestRunSummaryCachedIndicator(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "(cached)") {
-		t.Fatalf("expected '(cached)' marker, got %s", out)
-	}
+	assertContainsTranslation(t, out, msgCachedMarker)
 	if !strings.Contains(out, "Already cached summary") {
 		t.Fatalf("expected cached summary content")
 	}
@@ -1460,18 +1436,17 @@ func setChromeCheckResult(available bool, err error) {
 }
 
 func TestCheckChromeAvailableSmoke(t *testing.T) {
-	oldOnce := chromeCheckOnce
 	oldAvail := chromeAvailable
 	oldErr := chromeCheckError
 	sentinel := errors.New("sentinel")
 	chromeCheckOnce = sync.Once{}
 	chromeAvailable = false
 	chromeCheckError = sentinel
-	defer func() {
-		chromeCheckOnce = oldOnce
+	t.Cleanup(func() {
+		chromeCheckOnce = sync.Once{}
 		chromeAvailable = oldAvail
 		chromeCheckError = oldErr
-	}()
+	})
 	_, err := checkChromeAvailable()
 	if err == nil {
 		if !chromeAvailable {
@@ -1613,9 +1588,7 @@ func TestHTTPGetAllRetriesFail(t *testing.T) {
 	if callCount != 3 {
 		t.Fatalf("expected exactly 3 attempts, got %d", callCount)
 	}
-	if !strings.Contains(err.Error(), "transient HTTP status 500") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrHTTPTransientStatus, 500), tr("de", msgErrHTTPTransientStatus, 500))
 	if time.Since(start) < 150*time.Millisecond {
 		t.Fatalf("expected at least initial backoff delay; too fast")
 	}
@@ -1831,9 +1804,10 @@ func TestGetGrokipediaSummaryParsesFirstBlock(t *testing.T) {
 
 func TestGetGrokipediaSummaryEmptyTitle(t *testing.T) {
 	_, _, _, err := getGrokipediaSummary("   ")
-	if err == nil || !strings.Contains(err.Error(), "empty title") {
+	if err == nil {
 		t.Fatalf("expected empty title error, got %v", err)
 	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrGrokipediaEmptyTitle), tr("de", msgErrGrokipediaEmptyTitle))
 }
 
 func TestGetGrokipediaSummaryNotFound(t *testing.T) {
@@ -1844,9 +1818,10 @@ func TestGetGrokipediaSummaryNotFound(t *testing.T) {
 	defer func() { httpGetFunc = orig }()
 
 	_, _, _, err := getGrokipediaSummary("MissingArticle")
-	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+	if err == nil {
 		t.Fatalf("expected not found error, got %v", err)
 	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrGrokipediaMissingArticle, "MissingArticle"), tr("de", msgErrGrokipediaMissingArticle, "MissingArticle"))
 }
 
 func TestGetGrokipediaSummaryUnexpectedStatus(t *testing.T) {
@@ -1857,9 +1832,10 @@ func TestGetGrokipediaSummaryUnexpectedStatus(t *testing.T) {
 	defer func() { httpGetFunc = orig }()
 
 	_, _, _, err := getGrokipediaSummary("StatusArticle")
-	if err == nil || !strings.Contains(err.Error(), "unexpected status") {
+	if err == nil {
 		t.Fatalf("expected status error, got %v", err)
 	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrGrokipediaUnexpectedStatus, 500), tr("de", msgErrGrokipediaUnexpectedStatus, 500))
 }
 
 func TestGetGrokipediaSummaryMissingDescription(t *testing.T) {
@@ -1870,9 +1846,10 @@ func TestGetGrokipediaSummaryMissingDescription(t *testing.T) {
 	defer func() { httpGetFunc = orig }()
 
 	_, _, _, err := getGrokipediaSummary("NoDesc")
-	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+	if err == nil {
 		t.Fatalf("expected missing description error, got %v", err)
 	}
+	assertContainsAny(t, err.Error(), tr("en", msgErrGrokipediaMissingArticle, "NoDesc"), tr("de", msgErrGrokipediaMissingArticle, "NoDesc"))
 }
 
 func TestGetGrokipediaSummaryTruncation(t *testing.T) {
@@ -1916,7 +1893,7 @@ func TestSearchGrokipediaIntegration(t *testing.T) {
 	os.Remove(path)
 
 	// Search for a known topic
-	titles, cached, err := searchGrokipedia("Elon Musk")
+	titles, cached, err := searchGrokipedia("en", "Elon Musk")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1940,7 +1917,7 @@ func TestSearchGrokipediaIntegration(t *testing.T) {
 	}
 
 	// Second search should be cached
-	titles2, cached2, err2 := searchGrokipedia("Elon Musk")
+	titles2, cached2, err2 := searchGrokipedia("en", "Elon Musk")
 	if err2 != nil {
 		t.Fatalf("unexpected cached error: %v", err2)
 	}
@@ -2030,7 +2007,7 @@ func TestIsGrokipediaNotFound(t *testing.T) {
 	if isGrokipediaNotFound(nil) {
 		t.Fatalf("expected false for nil error")
 	}
-	if !isGrokipediaNotFound(errors.New("article 'X' does not exist on Grokipedia yet")) {
+	if !isGrokipediaNotFound(newLocalizedError(msgErrGrokipediaMissingArticle, "X")) {
 		t.Fatalf("expected true for not found error")
 	}
 	if isGrokipediaNotFound(errors.New("other error")) {
@@ -2158,7 +2135,7 @@ func TestSearchGrokipediaUsesCache(t *testing.T) {
 	delete(data, "grokipedia:"+escaped)
 	saveSearchCache(data)
 
-	titles, cached, err := searchGrokipedia(q)
+	titles, cached, err := searchGrokipedia("en", q)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2169,7 +2146,7 @@ func TestSearchGrokipediaUsesCache(t *testing.T) {
 		t.Fatalf("unexpected titles: %v", titles)
 	}
 
-	titles2, cached2, err2 := searchGrokipedia(q)
+	titles2, cached2, err2 := searchGrokipedia("en", q)
 	if err2 != nil {
 		t.Fatalf("unexpected error on cached call: %v", err2)
 	}
@@ -2198,7 +2175,7 @@ func TestSearchGrokipediaFallbackOnChromedpError(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 
-	titles, cached, err := searchGrokipedia("FallbackTerm")
+	titles, cached, err := searchGrokipedia("en", "FallbackTerm")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2218,7 +2195,7 @@ func TestSearchGrokipediaChromeUnavailableFallback(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 
-	titles, cached, err := searchGrokipedia("NoChromeTerm")
+	titles, cached, err := searchGrokipedia("en", "NoChromeTerm")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2244,7 +2221,7 @@ func TestSearchGrokipediaChromedpNoResultsFallback(t *testing.T) {
 	}
 	defer func() { httpGetFunc = orig }()
 
-	titles, cached, err := searchGrokipedia("EmptyResults")
+	titles, cached, err := searchGrokipedia("en", "EmptyResults")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2257,7 +2234,7 @@ func TestSearchGrokipediaChromedpNoResultsFallback(t *testing.T) {
 }
 
 func TestSearchGrokipediaEmptyQuery(t *testing.T) {
-	_, _, err := searchGrokipedia("   ")
+	_, _, err := searchGrokipedia("en", "   ")
 	if err == nil {
 		t.Fatalf("expected error on empty search query")
 	}
@@ -2336,13 +2313,7 @@ func TestRunGrokipediaChromeNotFound(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "Chrome/Chromium browser not found") {
-		t.Fatalf("expected Chrome not found error message, got: %s", out)
-	}
-	if !strings.Contains(out, "Please install Chrome/Chromium") {
-		t.Fatalf("expected installation hint in error message, got: %s", out)
-	}
-	if !strings.Contains(out, "-source wikipedia") {
-		t.Fatalf("expected wikipedia alternative suggestion, got: %s", out)
-	}
+	assertContainsTranslation(t, out, msgChromeNotFoundError)
+	assertContainsTranslation(t, out, msgChromeNotFoundHint)
+	assertContainsTranslation(t, out, msgChromeNotFoundDetail)
 }
