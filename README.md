@@ -50,6 +50,15 @@ Current version: `0.8.2`
    go install
    ```
 
+## Smaller Binary (Optional)
+
+Use stripped build flags to reduce binary size:
+
+```shell
+go build -ldflags="-s -w" -o wikr .
+go install -ldflags="-s -w" .
+```
+
 ## Usage
 
 ```shell
