@@ -2,6 +2,8 @@
 
 wikr is a simple command line tool that provides quick summaries of Wikipedia articles in English or German.
 
+Current version: `0.8.2`
+
 ## Features
 
 - Search Wikipedia (English or German)
